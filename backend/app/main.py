@@ -44,6 +44,10 @@ def _try_auto_extract_keys():
                 else bool(valid_keys)
             )
             if valid_keys and has_message_key:
+                if hasattr(extractor, "bind_process_for_cached_keys"):
+                    for pid in extractor.find_wechat_processes():
+                        if extractor.bind_process_for_cached_keys(pid):
+                            break
                 logger.info("密钥已缓存且验证通过，跳过提取")
                 return
             logger.warning("缓存密钥无法解密当前数据库，删除后重新提取")

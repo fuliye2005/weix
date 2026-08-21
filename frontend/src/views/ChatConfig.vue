@@ -6,6 +6,26 @@
         <el-form-item label="启用机器人">
           <el-switch v-model="form.enabled" />
         </el-form-item>
+        <el-form-item label="工作微信账号">
+          <el-select
+            v-model="selectedAccount"
+            placeholder="自动选择"
+            clearable
+            style="width: 100%"
+            :loading="accountLoading"
+            @change="changeAccount"
+          >
+            <el-option
+              v-for="account in accounts"
+              :key="account.wxid"
+              :label="account.wxid"
+              :value="account.wxid"
+            />
+          </el-select>
+          <div v-if="accountHint" style="color: #909399; margin-top: 6px">
+            {{ accountHint }}
+          </div>
+        </el-form-item>
         <el-form-item label="群聊权限">
           <el-radio-group v-model="form.group_chat_mode">
             <el-radio label="all">所有人</el-radio>
@@ -83,7 +103,7 @@
 
 <script setup lang="ts">
 import { reactive, ref, onMounted } from 'vue'
-import { getChatConfig, updateChatConfig, getContacts, searchChatrooms, searchContactsApi } from '../api'
+import { getChatConfig, updateChatConfig, getContacts, searchChatrooms, searchContactsApi, getWechatAccounts, selectWechatAccount } from '../api'
 import { ElMessage } from 'element-plus'
 
 const form = reactive<any>({
@@ -106,6 +126,10 @@ const filteredContacts = ref<any[]>([])
 const selectedRoom = ref('')
 const selectedUser = ref('')
 const saving = ref(false)
+const accounts = ref<any[]>([])
+const selectedAccount = ref('')
+const accountLoading = ref(false)
+const accountHint = ref('')
 
 function roomName(id: string) {
   const found = allChatrooms.value.find((r: any) => r.room_id === id)
@@ -189,6 +213,24 @@ function removeUser(user: string) {
   form.private_whitelist = form.private_whitelist.filter((u: string) => u !== user)
 }
 
+async function changeAccount(wxid: string) {
+  accountLoading.value = true
+  accountHint.value = ''
+  try {
+    const res = await selectWechatAccount(wxid || '')
+    if (res.data?.success) {
+      accountHint.value = '账号已保存，请重启后端后切换数据库和微信窗口。'
+      ElMessage.success('工作账号已保存')
+    } else {
+      ElMessage.error(res.data?.error || '账号切换失败')
+    }
+  } catch {
+    accountHint.value = ''
+  } finally {
+    accountLoading.value = false
+  }
+}
+
 onMounted(async () => {
   try {
     const res = await getChatConfig()
@@ -196,6 +238,14 @@ onMounted(async () => {
   } catch {
     ElMessage.error('加载配置失败')
   }
+
+  try {
+    const res = await getWechatAccounts()
+    accounts.value = res.data?.accounts || []
+    selectedAccount.value = res.data?.selected || ''
+    const active = res.data?.active || ''
+    if (active) accountHint.value = `当前运行账号：${active}`
+  } catch {}
 
   try {
     const res = await getContacts('all')

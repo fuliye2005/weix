@@ -29,7 +29,17 @@ def download_embedding_model():
     try:
         from sentence_transformers import SentenceTransformer
 
-        model = SentenceTransformer(model_name)
+        # Avoid repeated network HEAD requests when setup.bat is run again.
+        model_source = model_name
+        try:
+            from huggingface_hub import snapshot_download
+
+            model_source = snapshot_download(model_name, local_files_only=True)
+            logger.info("检测到本地缓存，跳过网络下载: %s", model_source)
+        except Exception:
+            pass
+
+        model = SentenceTransformer(model_source)
         dim = model.get_embedding_dimension()
         logger.info("embedding 模型下载完成: dim=%d", dim)
         return True

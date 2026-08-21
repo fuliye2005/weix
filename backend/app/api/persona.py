@@ -93,11 +93,14 @@ async def analyze_persona(force: bool = False):
             keys = getattr(extractor, "_keys", {})
 
         if not keys:
-            return {"success": False, "error": "未获取数据库密钥，请以 sudo 启动服务"}
+            message = (
+                "未获取数据库密钥，请以管理员身份启动服务并保持微信已登录"
+                if platform.is_windows
+                else "未获取数据库密钥，请以 sudo 启动服务"
+            )
+            return {"success": False, "error": message}
 
-        from app.core.db_reader_macos import MacOSDBReader
-
-        reader = MacOSDBReader()
+        reader = platform.db_reader.__class__()
         all_dbs = reader.find_database_files()
 
         msg_db_path = None

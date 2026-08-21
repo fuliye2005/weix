@@ -3,10 +3,12 @@
 import os
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
 
 from app.api.auth import verify_token
+from app.config import get_config
 from app.core.platform import Platform
-from app.utils.paths import get_data_dir
+from app.utils.paths import get_config_dir, get_data_dir
 
 router = APIRouter(
     prefix="/api/platform",
@@ -26,6 +28,69 @@ def _key_matches_db_path(key_path: str, full_path: str) -> bool:
     if "/" in normalized_key:
         return normalized_full.endswith(normalized_key)
     return os.path.normcase(key_path) == os.path.normcase(basename)
+
+
+class AccountSelectionRequest(BaseModel):
+    wxid: str = ""
+
+
+def _save_selected_account(wxid: str) -> None:
+    """Persist the selected Windows account without replacing other settings."""
+    import yaml
+
+    config_path = get_config_dir() / "config.yaml"
+    with open(config_path, "r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+    raw.setdefault("wechat", {}).setdefault("windows", {})["account"] = wxid
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(raw, f, allow_unicode=True, default_flow_style=False)
+
+    cfg = get_config()
+    cfg.wechat.setdefault("windows", {})["account"] = wxid
+
+
+@router.get("/accounts")
+async def list_accounts():
+    """List local Windows Weixin accounts available for the bot."""
+    platform = Platform.get()
+    extractor = platform.key_extractor
+    if not platform.is_windows or not hasattr(extractor, "get_available_accounts"):
+        return {"accounts": [], "selected": "", "active": "", "bound_pid": None}
+
+    accounts = extractor.get_available_accounts()
+    selected = extractor.selected_account()
+    active = getattr(extractor, "bound_account", "")
+    for account in accounts:
+        wxid = str(account.get("wxid", ""))
+        account["selected"] = wxid.lower() == selected.lower() if selected else False
+        account["active"] = wxid.lower() == str(active).lower() if active else False
+    return {
+        "accounts": accounts,
+        "selected": selected,
+        "active": active,
+        "bound_pid": getattr(extractor, "bound_pid", None),
+    }
+
+
+@router.put("/account")
+async def select_account(payload: AccountSelectionRequest):
+    """Choose which logged-in Windows Weixin account the bot will use."""
+    platform = Platform.get()
+    extractor = platform.key_extractor
+    wxid = payload.wxid.strip()
+    if platform.is_windows and hasattr(extractor, "get_available_accounts"):
+        accounts = extractor.get_available_accounts()
+        valid = {str(item.get("wxid", "")).lower() for item in accounts}
+        if wxid and wxid.lower() not in valid:
+            return {"success": False, "error": "未找到该微信账号的数据目录"}
+
+    _save_selected_account(wxid)
+    return {
+        "success": True,
+        "selected": wxid,
+        "restart_required": True,
+        "message": "账号已保存，请重启后端使数据库、监听和发送窗口切换到该账号",
+    }
 
 
 @router.get("/contacts")
@@ -63,7 +128,10 @@ async def list_contacts(
                     keys = json.load(f)
 
         if not keys:
-            error = "尚未提取数据库密钥。请以 sudo 启动后端进行密钥提取"
+            if platform.is_windows:
+                error = "尚未提取数据库密钥。请以管理员身份启动后端，并保持微信已登录"
+            else:
+                error = "尚未提取数据库密钥。请以 sudo 启动后端进行密钥提取"
         else:
             from app.core.db_reader_macos import MacOSDBReader
             from app.core.db_reader_windows import WindowsDBReader
@@ -161,11 +229,47 @@ async def platform_status():
     import json
 
     wechat_running = await platform.sender.is_wechat_running()
-    key_ready = (get_data_dir() / "all_keys.json").exists()
+    extractor = platform.key_extractor
+    keys = extractor.load_keys() if hasattr(extractor, "load_keys") else {}
+    key_ready = bool(keys)
+    db_ready = False
+    selected = extractor.selected_account() if hasattr(extractor, "selected_account") else ""
+    if keys and hasattr(extractor, "verify_key"):
+        try:
+            from app.core.db_reader_windows import WindowsDBReader
+
+            db_paths = WindowsDBReader.find_database_files()
+            selected_lower = selected.lower()
+            for db_path in db_paths:
+                if os.path.basename(db_path).lower() != "message_0.db":
+                    continue
+                if selected_lower and selected_lower not in _normalize_db_key_path(db_path).split("/"):
+                    continue
+                for key_path, hex_key in keys.items():
+                    if not _key_matches_db_path(str(key_path), db_path):
+                        continue
+                    try:
+                        db_ready = extractor.verify_key(bytes.fromhex(str(hex_key)), db_path)
+                    except (TypeError, ValueError):
+                        db_ready = False
+                    if db_ready:
+                        break
+                if db_ready:
+                    break
+        except Exception:
+            db_ready = False
+
+    accounts = []
+    if hasattr(extractor, "get_available_accounts"):
+        accounts = extractor.get_available_accounts()
 
     return {
         "platform": platform.name,
         "wechat_running": wechat_running,
         "key_ready": key_ready,
-        "db_ready": False,  # 需要实际尝试打开才能确认
+        "db_ready": db_ready,
+        "selected_account": selected,
+        "active_account": getattr(extractor, "bound_account", ""),
+        "bound_pid": getattr(extractor, "bound_pid", None),
+        "accounts": accounts,
     }

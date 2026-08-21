@@ -4,6 +4,10 @@ REM Weix - Windows 一键环境初始化脚本
 REM ============================================================
 setlocal enabledelayedexpansion
 
+for %%I in ("%~dp0..") do set "PROJECT_DIR=%%~fI"
+set "PYTHON_EXE=%PROJECT_DIR%\..\python313\python.exe"
+if not exist "%PYTHON_EXE%" set "PYTHON_EXE=%PROJECT_DIR%\venv\Scripts\python.exe"
+
 echo ============================================================
 echo  Weix - Windows 环境初始化
 echo ============================================================
@@ -19,32 +23,35 @@ if %ERRORLEVEL% NEQ 0 (
 
 REM 检查 Python
 echo [检查] Python 环境...
-where python >nul 2>nul
-if %ERRORLEVEL% NEQ 0 (
+if not exist "%PYTHON_EXE%" (
+    where python >nul 2>nul
+    if %ERRORLEVEL% EQU 0 set "PYTHON_EXE=python"
+)
+if not exist "%PYTHON_EXE%" if /I not "%PYTHON_EXE%"=="python" (
     echo [错误] 未找到 Python，请安装 Python 3.10+
     echo        https://www.python.org/downloads/
     pause
     exit /b 1
 )
 
-for /f "tokens=2" %%v in ('python --version 2^>^&1') do set PYVER=%%v
+for /f "tokens=2" %%v in ('"%PYTHON_EXE%" --version 2^>^&1') do set PYVER=%%v
 echo [信息] Python %PYVER%
 
 REM 创建虚拟环境
-if not exist "venv" (
+if not exist "%PYTHON_EXE%" if not exist "venv" (
     echo.
     echo [创建] Python 虚拟环境...
-    python -m venv venv
-    echo [完成] 虚拟环境已创建
+    "%PYTHON_EXE%" -m venv venv
+    set "PYTHON_EXE=%PROJECT_DIR%\venv\Scripts\python.exe"
+    echo [完成] Python 虚拟环境已创建
 )
 
-call venv\Scripts\activate.bat
-python -m pip install --upgrade pip -q
+"%PYTHON_EXE%" -m pip install --upgrade pip -q
 
 REM 安装后端依赖
 echo.
 echo [安装] 后端依赖...
-pip install -r backend\requirements.txt
+"%PYTHON_EXE%" -m pip install -r backend\requirements.txt
 echo [完成] 后端依赖安装完成
 
 REM 预下载 AI 模型
@@ -54,7 +61,7 @@ echo  预下载 AI 模型 (~1.4GB)
 echo  首次下载约需 5-15 分钟，请耐心等待...
 echo ============================================================
 if exist "scripts\download_models.py" (
-    python scripts\download_models.py
+    "%PYTHON_EXE%" scripts\download_models.py
     if %ERRORLEVEL% NEQ 0 (
         echo [警告] 模型预下载未完全成功，首次启动时会自动重试
     )

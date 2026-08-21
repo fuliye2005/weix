@@ -8,6 +8,16 @@ from pydantic_settings import BaseSettings
 
 from app.utils.paths import get_base_dir, get_config_dir
 
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - dependency is installed in normal setups
+    load_dotenv = None
+
+
+if load_dotenv is not None:
+    # Load local secrets before YAML placeholders such as ${DEEPSEEK_API_KEY} resolve.
+    load_dotenv(get_base_dir() / ".env", override=False)
+
 
 class Config(BaseSettings):
     """Application configuration loaded from YAML with env override."""

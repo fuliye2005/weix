@@ -182,6 +182,20 @@ class WindowsDBReader(BaseDBReader):
         if self._has_msg_shard_tables():
             return self._query_v4_messages_since(timestamp)
 
+        # A newly-created Weixin 4.x account may have a valid, encrypted
+        # message_0.db containing only metadata until its first chat message.
+        # Treat that state as an empty message stream instead of repeatedly
+        # querying the legacy MSG table and logging an error every poll.
+        try:
+            has_legacy_msg = self._sqlite_conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='MSG' LIMIT 1"
+            ).fetchone()
+        except Exception:
+            has_legacy_msg = None
+        if has_legacy_msg is None:
+            return []
+
         try:
             cursor = self._sqlite_conn.execute(
                 """
@@ -521,8 +535,14 @@ class WindowsDBReader(BaseDBReader):
                 "SELECT COUNT(*) FROM sqlite_master "
                 "WHERE type='table' AND (name='MSG' OR name LIKE 'Msg_%')"
             )
-            count = cursor.fetchone()[0]
-            return count > 0
+            if cursor.fetchone()[0] > 0:
+                return True
+
+            # Empty Weixin 4.x message databases contain metadata first and
+            # create per-conversation Msg_* tables only after the first chat.
+            # The filename is scoped to the selected account by the reader's
+            # database discovery, so accepting this file is safe here.
+            return os.path.basename(self._db_path).lower() == "message_0.db"
         except Exception:
             return False
 
@@ -558,7 +578,12 @@ class WindowsDBReader(BaseDBReader):
 
         通过扫描微信数据目录中 wxid_ 开头的文件夹获取。
         """
+        configured = cls._configured_wxid()
         for expanded in cls._get_data_dirs():
+            if configured:
+                selected_dir = os.path.join(expanded, configured)
+                if os.path.isdir(selected_dir):
+                    return configured
             try:
                 for entry in os.scandir(expanded):
                     if not entry.is_dir():
@@ -582,6 +607,7 @@ class WindowsDBReader(BaseDBReader):
         - xwechat_files/<wxid>/db_storage/<category>/<db>.db
         """
         db_files: list[str] = []
+        wxid = wxid or cls._configured_wxid()
 
         for expanded in cls._get_data_dirs():
             try:
@@ -611,6 +637,19 @@ class WindowsDBReader(BaseDBReader):
                 continue
 
         return db_files
+
+    @staticmethod
+    def _configured_wxid() -> str:
+        """Read the account selected for the Windows bot, if any."""
+        try:
+            from app.config import get_config
+
+            wechat_cfg = get_config().wechat
+            windows_cfg = wechat_cfg.get("windows", {}) if isinstance(wechat_cfg, dict) else {}
+            value = windows_cfg.get("account", "") if isinstance(windows_cfg, dict) else ""
+            return str(value or "").strip()
+        except Exception:
+            return ""
 
     @classmethod
     def _get_data_dirs(cls) -> list[str]:

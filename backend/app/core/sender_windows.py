@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import ctypes
 import json
 import logging
 import os
@@ -12,6 +13,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+
+from ctypes import wintypes
 
 import pyautogui
 import pyperclip
@@ -25,6 +28,97 @@ logger = logging.getLogger(__name__)
 # 微信窗口标题（中文/英文）
 WECHAT_WINDOW_TITLES = ["微信", "WeChat"]
 WECHAT_PROCESS_NAMES = {"weixin.exe", "wechat.exe"}
+
+
+if os.name == "nt":
+    _USER32 = ctypes.WinDLL("user32", use_last_error=True)
+    _WND_ENUM_PROC = ctypes.WINFUNCTYPE(
+        wintypes.BOOL,
+        wintypes.HWND,
+        wintypes.LPARAM,
+    )
+    _USER32.EnumWindows.argtypes = [_WND_ENUM_PROC, wintypes.LPARAM]
+    _USER32.EnumWindows.restype = wintypes.BOOL
+    _USER32.IsWindowVisible.argtypes = [wintypes.HWND]
+    _USER32.IsWindowVisible.restype = wintypes.BOOL
+    _USER32.IsIconic.argtypes = [wintypes.HWND]
+    _USER32.IsIconic.restype = wintypes.BOOL
+    _USER32.IsZoomed.argtypes = [wintypes.HWND]
+    _USER32.IsZoomed.restype = wintypes.BOOL
+    _USER32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    _USER32.GetWindowTextLengthW.restype = ctypes.c_int
+    _USER32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    _USER32.GetWindowTextW.restype = ctypes.c_int
+    _USER32.GetWindowThreadProcessId.argtypes = [
+        wintypes.HWND,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _USER32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    _USER32.GetWindowRect.argtypes = [
+        wintypes.HWND,
+        ctypes.POINTER(wintypes.RECT),
+    ]
+    _USER32.GetWindowRect.restype = wintypes.BOOL
+    _USER32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    _USER32.ShowWindow.restype = wintypes.BOOL
+    _USER32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    _USER32.SetForegroundWindow.restype = wintypes.BOOL
+    _USER32.SetWindowPos.argtypes = [
+        wintypes.HWND,
+        wintypes.HWND,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.UINT,
+    ]
+    _USER32.SetWindowPos.restype = wintypes.BOOL
+else:  # pragma: no cover - this module is only selected on Windows
+    _USER32 = None
+    _WND_ENUM_PROC = None
+
+
+def _window_title(hwnd: int) -> str:
+    if _USER32 is None:
+        return ""
+    length = int(_USER32.GetWindowTextLengthW(hwnd))
+    buffer = ctypes.create_unicode_buffer(max(length + 1, 256))
+    _USER32.GetWindowTextW(hwnd, buffer, len(buffer))
+    return buffer.value.strip()
+
+
+def _window_pid(hwnd: int) -> int | None:
+    if _USER32 is None:
+        return None
+    pid = wintypes.DWORD()
+    if not _USER32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)):
+        return None
+    return int(pid.value)
+
+
+def _window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
+    if _USER32 is None:
+        return None
+    rect = wintypes.RECT()
+    if not _USER32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return None
+    return int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)
+
+
+def _activate_window(hwnd: int) -> None:
+    """Activate a window without importing pywin32."""
+    if _USER32 is None:
+        return
+    show_command = 9 if _USER32.IsIconic(hwnd) else 5  # SW_RESTORE / SW_SHOW
+    _USER32.ShowWindow(hwnd, show_command)
+    _USER32.SetForegroundWindow(hwnd)
+
+
+def _move_window(hwnd: int, left: int, top: int, width: int, height: int) -> bool:
+    if _USER32 is None:
+        return False
+    # SWP_NOZORDER | SWP_NOACTIVATE
+    return bool(_USER32.SetWindowPos(hwnd, None, left, top, width, height, 0x0004 | 0x0010))
 
 # 单线程 executor，保证 GUI 操作严格串行
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wx-gui")
@@ -53,9 +147,15 @@ class _WindowRef:
             else:
                 win32gui.ShowWindow(self.hwnd, win32con.SW_SHOW)
             win32gui.SetForegroundWindow(self.hwnd)
+            return
         except Exception:
-            # The caller has a click-based fallback after activation.
-            pass
+            # pywin32 is not compatible with every bundled Python build.
+            # Use user32 directly so the selected account still gets focused.
+            try:
+                _activate_window(self.hwnd)
+            except Exception:
+                # The caller has a click-based fallback after activation.
+                pass
 
 
 class WindowsSender(BaseMessageSender):
@@ -261,12 +361,27 @@ class WindowsSender(BaseMessageSender):
 
     # --- GUI 操作原语 ---
 
-    @staticmethod
-    def _find_wechat_window():
-        """查找微信主窗口。"""
-        win = WindowsSender._find_wechat_window_win32()
+    def _get_bound_pid(self) -> int | None:
+        """Return the PID selected by the Windows key extractor."""
+        try:
+            from app.core.platform import Platform
+
+            pid = Platform.get().key_extractor.bound_pid
+            return int(pid) if pid else None
+        except Exception:
+            return None
+
+    def _find_wechat_window(self):
+        """Find the selected Weixin main window."""
+        target_pid = self._get_bound_pid()
+        win = WindowsSender._find_wechat_window_win32(target_pid)
         if win is not None:
             return win
+
+        # When an account is explicitly selected, never fall back to an
+        # arbitrary same-titled window from another logged-in account.
+        if target_pid:
+            return None
 
         try:
             import pygetwindow as gw
@@ -288,35 +403,40 @@ class WindowsSender(BaseMessageSender):
             return None
 
     @staticmethod
-    def _find_wechat_window_win32():
+    def _find_wechat_window_win32(target_pid: int | None = None):
         """按进程名精确查找微信主窗口，避免误选 Weix/浏览器窗口。"""
-        try:
-            import psutil
-            import win32gui
-            import win32process
-        except Exception:
+        if _USER32 is None or _WND_ENUM_PROC is None:
             return None
+
+        import psutil
 
         matches: list[_WindowRef] = []
 
         def enum_handler(hwnd, _):
-            if not win32gui.IsWindowVisible(hwnd):
-                return
-            title = (win32gui.GetWindowText(hwnd) or "").strip()
+            if not _USER32.IsWindowVisible(hwnd):
+                return True
+            title = _window_title(hwnd)
             if title not in WECHAT_WINDOW_TITLES:
-                return
+                return True
             try:
-                _thread_id, pid = win32process.GetWindowThreadProcessId(hwnd)
+                pid = _window_pid(hwnd)
+                if not pid:
+                    return True
                 proc_name = psutil.Process(pid).name().lower()
             except Exception:
-                return
+                return True
             if proc_name not in WECHAT_PROCESS_NAMES:
-                return
-            left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+                return True
+            if target_pid and pid != target_pid:
+                return True
+            rect = _window_rect(hwnd)
+            if rect is None:
+                return True
+            left, top, right, bottom = rect
             width = right - left
             height = bottom - top
             if width < 400 or height < 300:
-                return
+                return True
             matches.append(
                 _WindowRef(
                     left=left,
@@ -327,11 +447,14 @@ class WindowsSender(BaseMessageSender):
                     hwnd=hwnd,
                 )
             )
+            return True
 
         try:
-            win32gui.EnumWindows(enum_handler, None)
+            callback = _WND_ENUM_PROC(enum_handler)
+            _USER32.EnumWindows(callback, 0)
         except Exception:
             return None
+        matches.sort(key=lambda item: (item.width * item.height, -int(item.hwnd or 0)), reverse=True)
         return matches[0] if matches else None
 
     def _activate_wechat(self) -> None:
@@ -360,12 +483,8 @@ class WindowsSender(BaseMessageSender):
         if not hwnd:
             return win
         try:
-            import win32con
-            import win32gui
-
             screen_w, screen_h = pyautogui.size()
-            _flags, show_cmd, *_rest = win32gui.GetWindowPlacement(hwnd)
-            if show_cmd == win32con.SW_SHOWMAXIMIZED:
+            if _USER32 is not None and _USER32.IsZoomed(hwnd):
                 return win
             if win.width >= screen_w or win.height >= screen_h:
                 return win
@@ -376,15 +495,31 @@ class WindowsSender(BaseMessageSender):
             if new_left == win.left and new_top == win.top:
                 return win
 
-            win32gui.SetWindowPos(
-                hwnd,
-                None,
-                int(new_left),
-                int(new_top),
-                int(win.width),
-                int(win.height),
-                win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE,
-            )
+            moved = False
+            try:
+                import win32con
+                import win32gui
+
+                win32gui.SetWindowPos(
+                    hwnd,
+                    None,
+                    int(new_left),
+                    int(new_top),
+                    int(win.width),
+                    int(win.height),
+                    win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE,
+                )
+                moved = True
+            except Exception:
+                moved = _move_window(
+                    hwnd,
+                    int(new_left),
+                    int(new_top),
+                    int(win.width),
+                    int(win.height),
+                )
+            if not moved:
+                return win
             time.sleep(0.2)
             refreshed = self._find_wechat_window()
             return refreshed or win

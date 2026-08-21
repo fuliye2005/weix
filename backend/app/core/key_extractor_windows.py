@@ -37,6 +37,17 @@ RESERVED_SIZE = 80
 LEGACY_RESERVED_SIZE = 48
 SQLITE_HEADER = b"SQLite format 3\x00"
 
+# Windows Weixin 4.1+ keeps the database key material behind the runtime
+# Config.Cipher object instead of leaving the old x'<key><salt>' text in memory.
+WINDOWS_CONFIG_CIPHER_NAME = b"com.Tencent.WCDB.Config.Cipher"
+WINDOWS_CONFIG_XOR_MASK = bytes.fromhex(
+    "d2c7442458020000004889442450488b"
+    "450048844c2448488944254048584c24"
+)
+WINDOWS_MAX_USER_ADDRESS = 0x0000_8000_0000_0000
+WINDOWS_CONFIG_BLOB_MAX = 1024
+WINDOWS_CONFIG_LITERAL_RE = re.compile(rb"[xX]'([0-9A-Fa-f]{64,192})'")
+
 PROCESS_VM_READ = 0x0010
 PROCESS_QUERY_INFORMATION = 0x0400
 PROCESS_ALL_ACCESS = PROCESS_VM_READ | PROCESS_QUERY_INFORMATION
@@ -61,6 +72,57 @@ READABLE_PROTECTIONS = (
     | PAGE_EXECUTE_READWRITE
     | PAGE_EXECUTE_WRITECOPY
 )
+
+
+def _xor_repeat(data: bytes, mask: bytes) -> bytes:
+    return bytes(value ^ mask[index % len(mask)] for index, value in enumerate(data))
+
+
+def _u64_from(data: bytes, offset: int) -> int:
+    if offset < 0 or offset + 8 > len(data):
+        return 0
+    return struct.unpack_from("<Q", data, offset)[0]
+
+
+def _probable_runtime_key(data: bytes) -> bool:
+    return (
+        len(data) == 32
+        and len(set(data)) >= 15
+        and data not in {b"\x00" * 32, b"\xff" * 32}
+    )
+
+
+def _runtime_config_key_candidates(blob: bytes) -> list[tuple[str, str | None]]:
+    """Decode candidate key/salt pairs from a Weixin 4.1 Config.Cipher blob."""
+    if not blob or len(blob) > WINDOWS_CONFIG_BLOB_MAX:
+        return []
+
+    decoded = _xor_repeat(blob, WINDOWS_CONFIG_XOR_MASK)
+    candidates: list[tuple[str, str | None]] = []
+    seen: set[tuple[str, str | None]] = set()
+    for match in WINDOWS_CONFIG_LITERAL_RE.finditer(decoded):
+        run = match.group(1).decode("ascii").lower()
+        starts = [0]
+        if len(run) > 96:
+            starts.extend(range(0, len(run) - 63, 32))
+            starts.append(len(run) - 64)
+
+        for start in dict.fromkeys(starts):
+            if start < 0 or start + 64 > len(run):
+                continue
+            key_hex = run[start:start + 64]
+            try:
+                key_bytes = bytes.fromhex(key_hex)
+            except ValueError:
+                continue
+            if not _probable_runtime_key(key_bytes):
+                continue
+            salt_hex = run[start + 64:start + 96] if start + 96 <= len(run) else None
+            item = (key_hex, salt_hex)
+            if item not in seen:
+                seen.add(item)
+                candidates.append(item)
+    return candidates
 
 
 def _verify_sqlcipher_passphrase(passphrase: bytes, page1: bytes) -> bool:
@@ -176,11 +238,124 @@ class WindowsKeyExtractor(BaseKeyExtractor):
     SCAN_CHUNK_OVERLAP = 4096
 
     def __init__(self):
-        self._kernel32 = ctypes.windll.kernel32
+        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         self._setup_ctypes()
         self._keys: dict[str, str] = {}
         self._all_keys_file = get_data_dir() / "all_keys.json"
         self._data_dirs_cache: Optional[list[str]] = None
+        self._bound_pid: Optional[int] = None
+        self._bound_account: str = ""
+
+    @property
+    def bound_pid(self) -> Optional[int]:
+        """微信主进程 PID associated with the currently loaded key cache."""
+        return self._bound_pid
+
+    @property
+    def bound_account(self) -> str:
+        """Account directory associated with the currently loaded key cache."""
+        return self._bound_account or self._selected_account()
+
+    def selected_account(self) -> str:
+        """Return the configured Windows account directory, or empty for auto."""
+        return self._selected_account()
+
+    def get_available_accounts(self) -> list[dict[str, object]]:
+        """List logged-in xwechat account directories visible on this machine."""
+        selected = self._selected_account().lower()
+        accounts: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for data_root in self._find_wechat_data_dirs():
+            try:
+                for entry in os.scandir(data_root):
+                    if not entry.is_dir() or not entry.name.lower().startswith("wxid_"):
+                        continue
+                    storage = os.path.join(entry.path, "db_storage")
+                    if not os.path.isdir(storage):
+                        continue
+                    key = entry.name.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    accounts.append({
+                        "wxid": entry.name,
+                        "data_dir": entry.path,
+                        "selected": key == selected if selected else False,
+                    })
+            except OSError as exc:
+                logger.debug("枚举微信账号目录失败 (%s): %s", data_root, exc)
+        accounts.sort(key=lambda item: str(item["wxid"]).lower())
+        return accounts
+
+    def bind_process_for_cached_keys(self, pid: int) -> bool:
+        """Bind a running Weixin main process to the loaded account cache."""
+        keys = self.load_keys()
+        if not keys:
+            return False
+
+        h_process = self._open_process(pid)
+        if not h_process:
+            return False
+        try:
+            addresses = self._get_memory_regions(h_process, self._get_system_info())
+            db_infos = self._collect_validation_dbs()
+            salt_to_infos: dict[str, list[dict[str, object]]] = {}
+            for info in db_infos:
+                salt_to_infos.setdefault(str(info["salt"]), []).append(info)
+            found_keys: dict[str, str] = {}
+            stats = self._scan_windows_v411_config_cipher(
+                h_process,
+                addresses,
+                salt_to_infos,
+                found_keys,
+                set(salt_to_infos),
+                time.monotonic(),
+                None,
+            )
+            if stats.get("matched_salts") and self._has_message_key(found_keys):
+                self._bound_pid = pid
+                self._bound_account = self._account_from_key_paths(found_keys)
+                logger.info(
+                    "已将微信进程绑定到账号: pid=%s account=%s",
+                    pid,
+                    self._bound_account or "auto",
+                )
+                return True
+            return False
+        finally:
+            self._kernel32.CloseHandle(h_process)
+
+    @staticmethod
+    def _account_from_key_paths(keys: dict[str, str]) -> str:
+        for key_path in keys:
+            for part in key_path.replace("\\", "/").split("/"):
+                if part.lower().startswith("wxid_"):
+                    return part
+        return ""
+
+    def _selected_account(self) -> str:
+        env_value = os.getenv("WEIX_WECHAT_ACCOUNT", "").strip()
+        if env_value:
+            return env_value
+        try:
+            from app.config import get_config
+
+            wechat_cfg = get_config().wechat
+            windows_cfg = wechat_cfg.get("windows", {}) if isinstance(wechat_cfg, dict) else {}
+            value = windows_cfg.get("account", "") if isinstance(windows_cfg, dict) else ""
+            return str(value or "").strip()
+        except Exception:
+            return ""
+
+    def _db_belongs_to_selected_account(self, db_path: str) -> bool:
+        selected = self._selected_account().lower()
+        if not selected:
+            return True
+        return selected in {
+            part.lower()
+            for part in os.path.normpath(db_path).split(os.sep)
+            if part
+        }
 
     def _setup_ctypes(self):
         """配置 ctypes 函数签名，防止 64 位系统指针截断。"""
@@ -383,6 +558,50 @@ class WindowsKeyExtractor(BaseKeyExtractor):
             hex_candidate_count = 0
             cancelled = False
 
+            # Weixin 4.1+ stores the raw key in a runtime Config.Cipher object.
+            # Try that format before the legacy WCDB/raw-hex scans below.
+            remaining_salts = set(salt_to_infos)
+            runtime_stats = self._scan_windows_v411_config_cipher(
+                h_process,
+                addresses,
+                salt_to_infos,
+                found_keys,
+                remaining_salts,
+                started_at,
+                stop_event,
+            )
+            candidate_count += int(runtime_stats.get("candidate_count", 0))
+            if runtime_stats.get("matched_salts"):
+                logger.info(
+                    "新版 Config.Cipher 扫描匹配到 %d 个数据库密钥",
+                    runtime_stats["matched_salts"],
+                )
+                # A message_0.db key is sufficient to bring the reply pipeline
+                # online; other databases are optional for the first startup.
+                if self._has_message_key(found_keys):
+                    self._keys = found_keys
+                    self._bound_pid = pid
+                    self._bound_account = self._account_from_key_paths(found_keys)
+                    self._save_keys()
+                    logger.info(
+                        "扫描完成，候选密钥 %d 个，有效密钥 %d 个",
+                        candidate_count,
+                        len(found_keys),
+                    )
+                    return found_keys
+
+            # With an explicit account selection, a process that does not
+            # expose any database salt for that account is the wrong WeChat
+            # instance. Skip the legacy full-memory scan instead of waiting
+            # up to a minute before trying the next PID.
+            if self._selected_account():
+                logger.info(
+                    "进程 %s 未匹配所选账号 %s，跳过旧版全内存扫描",
+                    pid,
+                    self._selected_account(),
+                )
+                return {}
+
             wcdb_keys, wcdb_candidates, wcdb_cancelled = self._scan_wcdb_cached_keys(
                 h_process,
                 addresses,
@@ -478,6 +697,8 @@ class WindowsKeyExtractor(BaseKeyExtractor):
 
             if found_keys:
                 self._keys = found_keys
+                self._bound_pid = pid
+                self._bound_account = self._account_from_key_paths(found_keys)
                 self._save_keys()
             else:
                 self._log_windows_4x_key_info_hint(db_infos)
@@ -489,6 +710,172 @@ class WindowsKeyExtractor(BaseKeyExtractor):
 
         finally:
             self._kernel32.CloseHandle(h_process)
+
+    def _scan_windows_v411_config_cipher(
+        self,
+        h_process: int,
+        addresses: list[tuple[int, int]],
+        salt_to_infos: dict[str, list[dict[str, object]]],
+        found_keys: dict[str, str],
+        remaining_salts: set[str],
+        started_at: float,
+        stop_event: Optional[threading.Event],
+    ) -> dict[str, int]:
+        """Scan the read-only Config.Cipher runtime structure used by Weixin 4.1+."""
+        stats = {
+            "needle_occurrences": 0,
+            "node_candidates": 0,
+            "config_ptr_candidates": 0,
+            "blob99_count": 0,
+            "candidate_count": 0,
+            "verified_candidates": 0,
+            "matched_salts": 0,
+        }
+        if not addresses or not remaining_salts:
+            return stats
+
+        needle_addresses: set[int] = set()
+        for start_addr, region_size in addresses:
+            if stop_event is not None and stop_event.is_set():
+                return stats
+            if time.monotonic() - started_at > self.SCAN_TIMEOUT_SECONDS:
+                return stats
+            try:
+                for chunk_addr, buffer in self._iter_region_chunks(
+                    h_process,
+                    start_addr,
+                    region_size,
+                ):
+                    pos = buffer.find(WINDOWS_CONFIG_CIPHER_NAME)
+                    while pos >= 0:
+                        needle_addresses.add(chunk_addr + pos)
+                        pos = buffer.find(WINDOWS_CONFIG_CIPHER_NAME, pos + 1)
+            except Exception as exc:
+                logger.debug("扫描 Config.Cipher 字符串失败: %s", exc)
+
+        stats["needle_occurrences"] = len(needle_addresses)
+        if not needle_addresses:
+            return stats
+
+        pair_patterns = [
+            struct.pack("<Q", address)
+            + struct.pack("<Q", len(WINDOWS_CONFIG_CIPHER_NAME))
+            for address in needle_addresses
+        ]
+        seen_config_ptrs: set[int] = set()
+        seen_candidates: set[tuple[str, str | None]] = set()
+
+        for start_addr, region_size in addresses:
+            if not remaining_salts:
+                break
+            if stop_event is not None and stop_event.is_set():
+                return stats
+            if time.monotonic() - started_at > self.SCAN_TIMEOUT_SECONDS:
+                break
+            try:
+                chunks = self._iter_region_chunks(
+                    h_process,
+                    start_addr,
+                    region_size,
+                )
+                for chunk_addr, buffer in chunks:
+                    if not buffer:
+                        continue
+                    for pattern in pair_patterns:
+                        pos = buffer.find(pattern)
+                        while pos >= 0:
+                            qaddr = chunk_addr + pos
+                            node = self._read_process_memory(h_process, qaddr - 0x10, 0x50)
+                            if not node or len(node) < 0x40:
+                                pos = buffer.find(pattern, pos + 1)
+                                continue
+                            if (
+                                _u64_from(node, 0x10) not in needle_addresses
+                                or _u64_from(node, 0x18) != len(WINDOWS_CONFIG_CIPHER_NAME)
+                            ):
+                                pos = buffer.find(pattern, pos + 1)
+                                continue
+
+                            config_ptr = _u64_from(node, 0x28)
+                            if not (0x10000 <= config_ptr < WINDOWS_MAX_USER_ADDRESS):
+                                pos = buffer.find(pattern, pos + 1)
+                                continue
+                            stats["node_candidates"] += 1
+                            seen_config_ptrs.add(config_ptr)
+
+                            blob_object = self._read_process_memory(
+                                h_process,
+                                config_ptr + 0x88,
+                                0x28,
+                            )
+                            if not blob_object or len(blob_object) < 0x18:
+                                pos = buffer.find(pattern, pos + 1)
+                                continue
+                            data_ptr = _u64_from(blob_object, 0x8)
+                            data_len = _u64_from(blob_object, 0x10)
+                            if not (
+                                0 < data_len <= WINDOWS_CONFIG_BLOB_MAX
+                                and 0x10000 <= data_ptr < WINDOWS_MAX_USER_ADDRESS
+                            ):
+                                pos = buffer.find(pattern, pos + 1)
+                                continue
+
+                            blob = self._read_process_memory(h_process, data_ptr, int(data_len))
+                            if not blob or len(blob) != data_len:
+                                pos = buffer.find(pattern, pos + 1)
+                                continue
+                            if data_len == 99:
+                                stats["blob99_count"] += 1
+
+                            for key_hex, embedded_salt in _runtime_config_key_candidates(blob):
+                                candidate = (key_hex, embedded_salt)
+                                if candidate in seen_candidates:
+                                    continue
+                                seen_candidates.add(candidate)
+                                stats["candidate_count"] += 1
+
+                                salts_to_try = (
+                                    [embedded_salt]
+                                    if embedded_salt in remaining_salts
+                                    else list(remaining_salts)
+                                )
+                                for salt_hex in salts_to_try:
+                                    if salt_hex not in remaining_salts:
+                                        continue
+                                    key_bytes = bytes.fromhex(key_hex)
+                                    for info in salt_to_infos.get(salt_hex, []):
+                                        page1 = info.get("page1")
+                                        if not isinstance(page1, bytes):
+                                            continue
+                                        if not self._verify_direct_aes_key(key_bytes, page1):
+                                            continue
+                                        rel_path = str(info["rel_path"])
+                                        found_keys[rel_path] = key_hex.upper()
+                                        remaining_salts.discard(salt_hex)
+                                        stats["verified_candidates"] += 1
+                                        stats["matched_salts"] += 1
+                                        logger.info("Config.Cipher 密钥验证成功: %s", rel_path)
+                                        break
+                                    if salt_hex not in remaining_salts:
+                                        break
+                            pos = buffer.find(pattern, pos + 1)
+            except Exception as exc:
+                logger.debug("扫描 Config.Cipher 运行时对象失败: %s", exc)
+
+        stats["config_ptr_candidates"] = len(seen_config_ptrs)
+        if stats["matched_salts"]:
+            logger.info(
+                "Config.Cipher 扫描完成: 匹配 %d 个 salt，候选 %d 个",
+                stats["matched_salts"],
+                stats["candidate_count"],
+            )
+        else:
+            logger.info(
+                "Config.Cipher 扫描未匹配到有效密钥 (nodes=%d, candidates=%d)",
+                stats["node_candidates"],
+                stats["candidate_count"],
+            )
+        return stats
 
     def _scan_wcdb_cached_keys(
         self,
@@ -932,6 +1319,8 @@ class WindowsKeyExtractor(BaseKeyExtractor):
                         if not lower.endswith(".db") or lower.endswith(("-wal", "-shm")):
                             continue
                         full_path = os.path.join(root, fname)
+                        if not self._db_belongs_to_selected_account(full_path):
+                            continue
                         key = os.path.normcase(os.path.normpath(full_path))
                         if key in seen:
                             continue
@@ -1001,7 +1390,7 @@ class WindowsKeyExtractor(BaseKeyExtractor):
         db_path: str,
         data_roots: Optional[list[str]] = None,
     ) -> str:
-        """Return a stable key cache path relative to the account db root."""
+        """Return a stable key path that keeps the account name."""
         norm_db = os.path.normpath(db_path)
         for data_root in data_roots or self._find_wechat_data_dirs():
             try:
@@ -1010,11 +1399,9 @@ class WindowsKeyExtractor(BaseKeyExtractor):
                 continue
             if rel.startswith(".."):
                 continue
-            parts = rel.split(os.sep)
-            if "db_storage" in parts:
-                idx = parts.index("db_storage")
-                return "/".join(parts[idx + 1:])
-            return "/".join(parts)
+            # Keep wxid_xxx/db_storage/... so two logged-in accounts with the
+            # same message_0.db filename cannot overwrite or cross-match keys.
+            return rel.replace(os.sep, "/")
         return os.path.basename(norm_db)
 
     @staticmethod
@@ -1162,6 +1549,8 @@ class WindowsKeyExtractor(BaseKeyExtractor):
     def clear_keys(self) -> None:
         """清空内存和磁盘上的密钥缓存。"""
         self._keys = {}
+        self._bound_pid = None
+        self._bound_account = ""
         try:
             self._all_keys_file.unlink(missing_ok=True)
         except OSError as exc:
