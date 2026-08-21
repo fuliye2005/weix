@@ -128,7 +128,7 @@ class WeixAgent:
 
         # 注入 persona（用户语言风格）
         persona_text = self._get_persona_prompt(is_group=is_group)
-        guard_mode = "assistant" if is_group or not persona_text else "self"
+        guard_mode = "assistant" if not persona_text else "self"
         from app.ai.guard import get_hardened_system_prompt
         system_template = get_hardened_system_prompt(
             system_template,

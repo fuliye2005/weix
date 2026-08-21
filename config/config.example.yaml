@@ -15,6 +15,7 @@ ai:
   max_tokens: 2000
   model: deepseek-v4-pro
   persona_message_limit: 3000
+  persona_import_max_mb: 256
   persona_mode: contextual
   persona_since_days: 90
   provider: deepseek

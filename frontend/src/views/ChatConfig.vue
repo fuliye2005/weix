@@ -18,10 +18,24 @@
             <el-option
               v-for="account in accounts"
               :key="account.wxid"
-              :label="account.wxid"
+              :label="accountLabel(account)"
               :value="account.wxid"
-            />
+            >
+              <div class="account-option">
+                <div class="account-option-title">
+                  {{ account.nickname || account.alias || account.base_wxid || account.wxid }}
+                  <el-tag v-if="account.active" size="small" type="success">当前运行</el-tag>
+                  <el-tag v-else-if="account.selected" size="small" type="warning">配置中</el-tag>
+                </div>
+                <div class="account-option-detail">
+                  微信号：{{ account.alias || '未读取' }} · wxid：{{ account.base_wxid || account.wxid }}
+                </div>
+              </div>
+            </el-option>
           </el-select>
+          <div v-if="activeAccount" style="color: #67c23a; margin-top: 6px">
+            当前运行账号：{{ activeAccountLabel }}；其他选项是本机发现的历史数据目录。
+          </div>
           <div v-if="accountHint" style="color: #909399; margin-top: 6px">
             {{ accountHint }}
           </div>
@@ -128,6 +142,8 @@ const selectedUser = ref('')
 const saving = ref(false)
 const accounts = ref<any[]>([])
 const selectedAccount = ref('')
+const activeAccount = ref('')
+const activeAccountLabel = ref('')
 const accountLoading = ref(false)
 const accountHint = ref('')
 
@@ -231,6 +247,16 @@ async function changeAccount(wxid: string) {
   }
 }
 
+function accountLabel(account: any) {
+  const flags: string[] = []
+  if (account.active) flags.push('当前运行')
+  if (account.selected) flags.push('配置中')
+  const name = account.nickname || account.alias || account.base_wxid || account.wxid
+  const identity = account.alias ? `微信号：${account.alias}` : `wxid：${account.base_wxid || account.wxid}`
+  const suffix = flags.length ? `，${flags.join('、')}` : ''
+  return `${name}（${identity}${suffix}）`
+}
+
 onMounted(async () => {
   try {
     const res = await getChatConfig()
@@ -242,9 +268,17 @@ onMounted(async () => {
   try {
     const res = await getWechatAccounts()
     accounts.value = res.data?.accounts || []
-    selectedAccount.value = res.data?.selected || ''
     const active = res.data?.active || ''
-    if (active) accountHint.value = `当前运行账号：${active}`
+    activeAccount.value = active
+    selectedAccount.value = res.data?.selected || active || ''
+    const activeInfo = accounts.value.find((account: any) => account.active)
+    if (activeInfo) {
+      activeAccountLabel.value = accountLabel(activeInfo)
+      accountHint.value = `当前运行账号：${accountLabel(activeInfo)}`
+    } else if (active) {
+      activeAccountLabel.value = active
+      accountHint.value = `当前运行账号：${active}`
+    }
   } catch {}
 
   try {

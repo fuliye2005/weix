@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, UploadFile
 from pydantic import BaseModel, Field
 
 from app.api.auth import verify_token
@@ -42,6 +43,14 @@ class PersonaUpdateRequest(BaseModel):
     private_prompt: str = ""
     group_prompt: str = ""
     mode: str = "contextual"
+
+
+class PersonaImportAnalyzeRequest(BaseModel):
+    """选择外部导入中的一个人物进行风格分析。"""
+
+    import_id: str
+    speaker_id: str
+    force: bool = True
 
 
 @router.get("")
@@ -160,6 +169,161 @@ async def analyze_persona(force: bool = False):
 
     except Exception as exc:
         logger.error(f"Persona analysis failed: {exc}", exc_info=True)
+        return {"success": False, "error": str(exc)}
+
+
+@router.post("/import")
+async def import_persona_chat_files(files: list[UploadFile] = File(...)):
+    """上传一份或多份聊天 JSON，并返回可选择的人物列表。"""
+    try:
+        from app.ai.chat_import import (
+            MAX_IMPORT_MESSAGES,
+            create_import,
+            get_import_max_bytes,
+            parse_chat_payload,
+            summarize_participants,
+        )
+
+        if not files:
+            return {"success": False, "error": "请至少选择一个聊天记录 JSON 文件"}
+
+        messages: list[dict[str, str]] = []
+        max_import_bytes = get_import_max_bytes()
+        for index, upload in enumerate(files, start=1):
+            if max_import_bytes is None:
+                raw = await upload.read()
+            else:
+                raw = await upload.read(max_import_bytes + 1)
+            if max_import_bytes is not None and len(raw) > max_import_bytes:
+                max_import_mb = max_import_bytes / (1024 * 1024)
+                return {
+                    "success": False,
+                    "error": (
+                        f"文件过大：{upload.filename or f'文件{index}'}，"
+                        f"单文件限制为 {max_import_mb:g}MB；"
+                        "可在 config/config.yaml 的 ai.persona_import_max_mb 中调整，"
+                        "设为 0 表示不限制文件大小"
+                    ),
+                }
+            try:
+                payload = json.loads(raw.decode("utf-8-sig"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                return {
+                    "success": False,
+                    "error": f"无法解析 JSON：{upload.filename or f'文件{index}'}",
+                }
+
+            filename = os.path.basename(upload.filename or f"chat_{index}.json")
+            source_file = f"{index}:{filename}"
+            parsed = parse_chat_payload(payload, source_file=source_file)
+            messages.extend(parsed)
+            if len(messages) > MAX_IMPORT_MESSAGES:
+                return {
+                    "success": False,
+                    "error": f"聊天文本消息过多，最多支持 {MAX_IMPORT_MESSAGES} 条",
+                }
+
+        if not messages:
+            return {
+                "success": False,
+                "error": "没有找到可分析的文本消息，请确认 JSON 中包含 type=1 的消息",
+            }
+
+        import_id = create_import(messages)
+        return {
+            "success": True,
+            "import_id": import_id,
+            "file_count": len(files),
+            "total_messages": len(messages),
+            "participants": summarize_participants(messages),
+        }
+    except Exception as exc:
+        logger.error(f"Persona chat import failed: {exc}", exc_info=True)
+        return {"success": False, "error": str(exc)}
+
+
+@router.post("/import/analyze")
+async def analyze_imported_persona(payload: PersonaImportAnalyzeRequest):
+    """分析外部导入中指定稳定 ID 的人物消息。"""
+    try:
+        from app.ai.chat_import import load_import, summarize_participants
+        from app.ai.style_distiller import StyleDistiller
+
+        messages = load_import(payload.import_id)
+        speaker_id = payload.speaker_id.strip()
+        selected_messages = [
+            item
+            for item in messages
+            if str(item.get("speaker_id") or "").strip() == speaker_id
+        ]
+        if not selected_messages:
+            return {"success": False, "error": "导入中没有找到所选人物的文本消息"}
+
+        participant = next(
+            (
+                item
+                for item in summarize_participants(messages)
+                if item["id"] == speaker_id
+            ),
+            None,
+        )
+        if not participant:
+            return {"success": False, "error": "所选人物不存在或导入已损坏"}
+
+        contents = [item["content"] for item in selected_messages]
+        distiller = StyleDistiller()
+        persona = await distiller.analyze(
+            contents,
+            force=payload.force,
+            persona_name=participant["name"],
+            source="external_json",
+        )
+
+        from app.ai.agent import WeixAgent
+
+        WeixAgent._distiller = None
+        logger.info(
+            "External persona skill updated for %s; WeixAgent distiller cache reset",
+            speaker_id,
+        )
+
+        meta = persona.get("meta", {})
+        sample_size = meta.get("sample_size") or len(contents)
+        return {
+            "success": True,
+            "speaker_id": speaker_id,
+            "total_messages": len(selected_messages),
+            "import_total_messages": len(messages),
+            "sample_size": sample_size,
+            "mode": persona.get("mode", "contextual"),
+            "meta": meta,
+            "self_memory": persona.get("self_memory_md", ""),
+            "persona": persona.get("persona_md", ""),
+            "private_prompt": persona.get("runtime_prompt_private", ""),
+            "group_prompt": persona.get("runtime_prompt_group", ""),
+        }
+    except (FileNotFoundError, ValueError) as exc:
+        return {"success": False, "error": str(exc)}
+    except Exception as exc:
+        logger.error(f"Imported persona analysis failed: {exc}", exc_info=True)
+        return {"success": False, "error": str(exc)}
+
+
+@router.delete("/import/{import_id}")
+async def delete_persona_import(import_id: str):
+    """删除外部聊天导入，避免原始聊天内容长期留在本地。"""
+    try:
+        from app.ai.chat_import import delete_import
+
+        deleted = delete_import(import_id)
+        return {
+            "success": deleted,
+            "message": "聊天记录导入已删除" if deleted else "聊天记录导入不存在或已过期",
+        }
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
+    except Exception as exc:
+        logger.error(f"Persona chat import deletion failed: {exc}", exc_info=True)
         return {"success": False, "error": str(exc)}
 
 

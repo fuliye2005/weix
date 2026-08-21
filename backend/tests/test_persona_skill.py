@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.ai.guard import get_hardened_system_prompt
 from app.ai.agent import WeixAgent
-from app.ai.style_distiller import CACHE_VERSION, StyleDistiller
+from app.ai.style_distiller import CACHE_VERSION, PersonaAnalysisError, StyleDistiller
 
 
 class DummyResponse:
@@ -23,6 +23,11 @@ class DummyLLM:
         return DummyResponse(json.dumps(self.payload, ensure_ascii=False))
 
 
+class FailingLLM:
+    def invoke(self, _messages):
+        raise RuntimeError("401 Unauthorized: invalid api key")
+
+
 def _skill_payload() -> dict:
     return {
         "meta": {
@@ -35,6 +40,22 @@ def _skill_payload() -> dict:
         "runtime_prompt_private": "你正在作为阿七本人的微信镜像回复。保持阿七的表达习惯。",
         "runtime_prompt_group": "你仍然是「七七」微信助手，但说话风格参考阿七。",
     }
+
+
+def test_style_distiller_surfaces_provider_authentication_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "app.ai.style_distiller.create_llm",
+        lambda _config=None: FailingLLM(),
+    )
+
+    distiller = StyleDistiller(cache_path=tmp_path / "persona_skill.json")
+
+    try:
+        asyncio.run(distiller.analyze(["测试消息"], force=True))
+    except PersonaAnalysisError as exc:
+        assert str(exc) == "AI 接口鉴权失败，请在 .env 中配置有效的 DEEPSEEK_API_KEY，然后重启后端"
+    else:
+        raise AssertionError("Expected provider authentication failure")
 
 
 def test_style_distiller_generates_contextual_skill_cache_without_raw_messages(
@@ -61,6 +82,33 @@ def test_style_distiller_generates_contextual_skill_cache_without_raw_messages(
     assert "raw_messages" not in saved
     assert "source_messages" not in saved
     assert "秘密明文一" not in cache_path.read_text(encoding="utf-8")
+
+
+def test_style_distiller_external_import_uses_selected_person_name_and_source(
+    tmp_path, monkeypatch
+):
+    cache_path = tmp_path / "persona_skill.json"
+    monkeypatch.setattr(
+        "app.ai.style_distiller.create_llm",
+        lambda _config=None: DummyLLM(_skill_payload()),
+    )
+
+    distiller = StyleDistiller(cache_path=cache_path)
+    result = asyncio.run(
+        distiller.analyze(
+            ["外部聊天样本一", "外部聊天样本二"],
+            force=True,
+            persona_name="选中的人",
+            source="external_json",
+        )
+    )
+
+    assert result["meta"]["name"] == "选中的人"
+    assert result["meta"]["source"] == "external_json"
+    assert "作为选中的人本人的微信镜像" in result["runtime_prompt_private"]
+    assert "参考选中的人的说话风格" in result["runtime_prompt_group"]
+    saved = cache_path.read_text(encoding="utf-8")
+    assert "外部聊天样本一" not in saved
 
 
 def test_style_distiller_ignores_broken_new_cache_and_can_reanalyze(tmp_path, monkeypatch):

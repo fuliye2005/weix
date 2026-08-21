@@ -30,6 +30,83 @@ def _key_matches_db_path(key_path: str, full_path: str) -> bool:
     return os.path.normcase(key_path) == os.path.normcase(basename)
 
 
+def _account_base_wxid(account_id: str) -> str:
+    """Return the wxid portion of a Windows account directory name."""
+    value = str(account_id or "").strip()
+    if value.lower().startswith("wxid_") and value.count("_") >= 2:
+        return value.rsplit("_", 1)[0]
+    return value
+
+
+def _find_account_contact_db(data_dir: str) -> str:
+    """Find the contact database inside one account directory only."""
+    candidates = [
+        os.path.join(data_dir, "db_storage", "contact", "contact.db"),
+        os.path.join(data_dir, "Contact", "contact.db"),
+        os.path.join(data_dir, "Msg", "contact.db"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return ""
+
+
+def _find_key_for_db(keys: dict, db_path: str) -> str:
+    for key_path, hex_key in keys.items():
+        if _key_matches_db_path(str(key_path), db_path):
+            return str(hex_key or "")
+    return ""
+
+
+def _load_account_profile(platform, extractor, account: dict) -> dict[str, str]:
+    """Read the active account's nickname and alias from its own contact DB."""
+    if not account.get("active"):
+        return {}
+
+    data_dir = str(account.get("data_dir") or "")
+    db_path = _find_account_contact_db(data_dir)
+    if not db_path:
+        return {}
+
+    try:
+        keys = extractor.load_keys() if hasattr(extractor, "load_keys") else {}
+        hex_key = _find_key_for_db(keys, db_path)
+        if not hex_key:
+            return {}
+
+        reader = platform.db_reader.__class__()
+        try:
+            if not reader.open_db(db_path, bytes.fromhex(hex_key)):
+                return {}
+            contacts = reader.get_contacts()
+        finally:
+            reader.close()
+
+        account_id = str(account.get("wxid") or "").lower()
+        base_wxid = _account_base_wxid(account_id).lower()
+        for contact in contacts:
+            contact_wxid = str(contact.get("wxid") or "").strip()
+            contact_lower = contact_wxid.lower()
+            if not contact_lower:
+                continue
+            if contact_lower not in {account_id, base_wxid} and not account_id.startswith(
+                f"{contact_lower}_"
+            ):
+                continue
+            return {
+                "profile_wxid": contact_wxid,
+                "alias": str(contact.get("alias") or "").strip(),
+                "nickname": str(contact.get("nickname") or "").strip(),
+                "remark": str(contact.get("remark") or "").strip(),
+                "profile_source": "contact.db",
+            }
+    except (OSError, TypeError, ValueError) as exc:
+        logger.debug("读取当前微信账号资料失败: %s", exc)
+    except Exception as exc:
+        logger.debug("读取当前微信账号联系人记录失败: %s", exc)
+    return {}
+
+
 class AccountSelectionRequest(BaseModel):
     wxid: str = ""
 
@@ -64,6 +141,11 @@ async def list_accounts():
         wxid = str(account.get("wxid", ""))
         account["selected"] = wxid.lower() == selected.lower() if selected else False
         account["active"] = wxid.lower() == str(active).lower() if active else False
+        account["base_wxid"] = _account_base_wxid(wxid)
+
+    active_account = next((item for item in accounts if item.get("active")), None)
+    if active_account:
+        active_account.update(_load_account_profile(platform, extractor, active_account))
     return {
         "accounts": accounts,
         "selected": selected,

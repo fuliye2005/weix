@@ -50,9 +50,28 @@ export const getChatConfig = () => api.get('/config/chat')
 export const updateChatConfig = (data: any) => api.put('/config/chat', data)
 export const getAIConfig = () => api.get('/config/ai')
 export const updateAIConfig = (data: any) => api.put('/config/ai', data)
+export const getAIProviders = () => api.get('/config/ai/providers')
+export const testAIConnection = (data: any) => api.post('/config/ai/test', data)
+export const getRawConfig = () => api.get('/config/raw')
+export const updateRawConfig = (content: string) => api.put('/config/raw', { content })
+export const validateRawConfig = (content: string) => api.post('/config/raw/validate', { content })
+export const testCurrentAIConnection = () => api.post('/config/ai/test-current')
 export const getPersona = () => api.get('/persona')
 export const analyzePersona = (force: boolean = false) =>
   api.post('/persona/analyze', null, { params: { force } })
+export const importPersonaChatFiles = (files: File[]) => {
+  const form = new FormData()
+  files.forEach((file) => form.append('files', file))
+  return api.post('/persona/import', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+export const analyzeImportedPersona = (data: {
+  import_id: string
+  speaker_id: string
+  force?: boolean
+}) => api.post('/persona/import/analyze', data)
+export const deletePersonaImport = (importId: string) => api.delete(`/persona/import/${importId}`)
 export const updatePersona = (data: any) => api.put('/persona', data)
 export const clearPersona = () => api.delete('/persona')
 
