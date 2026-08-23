@@ -6,8 +6,8 @@
 
 - **收消息**：直接读取微信本地 SQLite 数据库（纯文件 I/O，微信进程无感知）
 - **AI 回复**：LangChain 编排大模型，支持多轮对话、工具调用、意图识别
-- **发消息**：两个平台均采用 GUI 模拟操作，不注入、不 Hook，与真人操作无异
-  - Windows：pyautogui 模拟鼠标点击 + 右键粘贴
+- **发消息**：Windows 优先使用 UI Automation 控件调用，鼠标发送可配置为显式兜底；macOS 使用 AppleScript
+  - Windows：`uia` 后台模式不激活微信、不移动鼠标，通过窗口消息投递发送事件；`mouse` 模式使用旧版 GUI 发送器
   - macOS：AppleScript 模拟键盘输入
 - **可视化管理**：Vue3 Web 后台，配置 AI、规则、模板，开箱即用
 
@@ -19,7 +19,7 @@
 - **工具调用**：天气查询、地图导航、搜索、计算等，AI 自动调用工具
 - **意图识别**：点单、投诉、咨询等意图自动触发对应工作流
 - **人设定制**：自定义 System Prompt，设定回复风格和角色
-- **本人 Skill**：AI 分析你的历史聊天记录，自动学习你的语气、风格和习惯，替你以假乱真地回复
+- **本人 Skill**：从多个聊天 JSON 中按 `senderUsername` 选择目标人物，支持 AI 人格生成、历史话术复用和混合模仿
 
 ### 增强功能
 - 关键词 / 正则规则兜底（AI 没匹配到时走规则）
@@ -43,21 +43,21 @@
                                           │              │              │
                                           └──────────────┼──────────────┘
                                                          ▼
-                                                  消息发送层（GUI 模拟）
+                                                  消息发送层
                                               ┌─────────┴─────────┐
                                               ▼                   ▼
-                                    Windows (pyautogui)   macOS (AppleScript)
+                                      Windows (UIA / 鼠标兜底)  macOS (AppleScript)
 ```
 
 ## 平台支持
 
 | 维度 | Windows | macOS |
 |------|---------|-------|
-| 微信版本 | PC 微信 3.9.12.51 | Mac 微信 4.x (App Store) |
+| 微信版本 | PC 微信 4.1.12.26（UIA）/ 3.9 系列（鼠标兼容模式） | Mac 微信 4.x (App Store) |
 | DB 路径 | `Documents/WeChat Files/<wxid>/Msg/` | `~/Library/Containers/com.tencent.xinWeChat/...` |
 | 密钥提取 | `ReadProcessMemory` (Win32 API) | `mach_vm_read_overwrite` (Mach VM) |
-| 消息发送 | pyautogui 模拟鼠标点击 + 右键粘贴 | AppleScript 模拟键盘输入 |
-| 发送风险 | 极低（无注入，纯 GUI 模拟） | 极低（与真人操作无异） |
+| 消息发送 | 后台 UIA 控件调用（可关闭鼠标兜底） | AppleScript 模拟键盘输入 |
+| 发送风险 | UIA 控件调用和窗口消息投递；必要时激活微信 accessibility 状态位，不注入代码 | 极低（与真人操作无异） |
 | 管理员权限 | 需要 | 需要 |
 
 ## 技术栈
@@ -88,6 +88,20 @@ cp .env.example .env
 ```
 
 然后编辑这两个文件，填入你的 API Key 等信息。
+
+Windows 后台发送建议使用以下配置：
+
+```yaml
+windows_sender:
+  method: uia
+  background_mode: true
+  allow_mouse_fallback: false
+  park_after_send: false
+```
+
+后台模式会直接调用微信当前可见的会话列表项，再通过 UIA 的无障碍模式写入和发送，
+不会把微信窗口切到前台。若目标会话不在当前可见会话列表中，系统会记录发送失败，
+不会偷偷回退到搜索框、键盘或鼠标操作。
 
 ### macOS
 
@@ -128,6 +142,7 @@ scripts\start.bat
 - **转发规则**：触发条件 + 目标群配置
 - **AI 配置**：Provider、API Key、模型、System Prompt
 - **本人 Skill**：AI 分析你的聊天记录，自动生成你的语气人设、自我记忆、私聊/群聊 Prompt
+- **历史聊天模仿**：`replay` 模式本地匹配“上下文 → 目标人物回复”，无需 API Key；`hybrid` 模式在历史复用和 Persona 生成之间回退
 - **定时任务**：日报/周报/健康检查/数据清理管理
 - **系统配置**：日志级别、数据保留、异常告警、备份恢复
 
@@ -139,6 +154,7 @@ scripts\start.bat
 |--------|------|
 | `platform` | 运行平台 (auto / windows / macos) |
 | `ai` | LLM 配置 (provider, api_key, model 等) |
+| `ai.persona_replay` | 历史话术复用阈值、上下文条数、few-shot 数量和重复冷却 |
 | `auto_reply.rules` | 自动回复规则（关键词/正则/意图） |
 | `templates` | 消息模板定义 |
 | `workflows` | 工作流状态机定义 |
@@ -160,9 +176,24 @@ weix/
 │       └── utils/      # 工具（限流器/日志）
 ├── frontend/           # Vue3 管理前端
 ├── config/             # 配置文件
+├── memory/             # 功能变化和实现约束记忆
 ├── scripts/            # 部署脚本
 └── README.md
 ```
+
+### 历史聊天模仿模式
+
+在管理后台“本人 Skill”页面上传一个或多个聊天 JSON，系统使用消息内部的
+`senderUsername` 识别人物，使用 `senderDisplayName` 展示名称；文件名只作为来源标记。
+人物列表同时展示稳定 ID，多个 JSON 中相同 `senderUsername` 会合并为同一个人物。
+选择人物后可切换：
+
+- `AI 人格生成`：调用 LLM 生成 Persona、Self Memory 和新回复。
+- `历史话术复用`：建立本地 `data/persona_replay.json` 索引，匹配相似上下文并复用历史原话；没有可靠匹配时不回复。
+- `混合模仿（推荐）`：高相似度复用原话，中等相似度将历史样本作为表达参考，低相似度回退 Persona。
+
+索引只处理文本消息，并按来源文件、会话和群聊/私聊场景隔离，不会把不同 JSON 文件首尾拼接。历史聊天内容始终作为数据处理，不会被提升为系统指令。阈值配置位于 `ai.persona_replay`，可在页面或配置文件中调整。
+删除临时导入 JSON 后，已经生成的 `data/persona_replay.json` 索引会继续保留，直到清除 Persona。
 
 ## 防封号策略
 

@@ -279,6 +279,14 @@ async def update_ai_config(data: dict):
             continue
         cfg.ai[k] = v
 
+    if "persona_replay" in data:
+        try:
+            from app.ai.agent import WeixAgent
+
+            WeixAgent._replay_engine = None
+        except Exception:
+            pass
+
     # 持久化到 YAML（排除掩码值）
     config_path = _get_config_path()
     try:

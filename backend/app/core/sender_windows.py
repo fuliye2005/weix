@@ -120,6 +120,18 @@ def _move_window(hwnd: int, left: int, top: int, width: int, height: int) -> boo
     # SWP_NOZORDER | SWP_NOACTIVATE
     return bool(_USER32.SetWindowPos(hwnd, None, left, top, width, height, 0x0004 | 0x0010))
 
+
+def _prepare_mouse_for_gui() -> None:
+    """Move the cursor away from PyAutoGUI's emergency corners before automation."""
+    try:
+        screen_width, screen_height = pyautogui.size()
+        safe_x = max(1, min(int(screen_width) - 2, int(screen_width) // 2))
+        safe_y = max(1, min(int(screen_height) - 2, int(screen_height) // 2))
+        if _USER32 is not None:
+            _USER32.SetCursorPos(safe_x, safe_y)
+    except Exception as exc:
+        logger.debug("准备微信 GUI 鼠标位置失败: %s", exc)
+
 # 单线程 executor，保证 GUI 操作严格串行
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wx-gui")
 
@@ -174,6 +186,9 @@ class WindowsSender(BaseMessageSender):
     def __init__(self):
         config = get_config()
         win_cfg = config.windows_sender if hasattr(config, "windows_sender") else {}
+        self._method = str(win_cfg.get("method", "mouse")).strip().lower()
+        self._allow_mouse_fallback = bool(win_cfg.get("allow_mouse_fallback", True))
+        self._uia_sender = None
         self._type_delay = win_cfg.get("type_delay", 0.3)
         self._window_activate_delay = win_cfg.get("window_activate_delay", 0.5)
         self._search_result_delay = win_cfg.get("search_result_delay", 2.0)
@@ -233,6 +248,12 @@ class WindowsSender(BaseMessageSender):
             logger.error("消息内容或接收者为空")
             return False
 
+        if self._method in {"uia", "uia_only", "uia-first"}:
+            uia_result = await self._send_text_uia(msg, receiver, is_group, target_id)
+            if uia_result or not self._allow_mouse_fallback:
+                return uia_result
+            logger.warning("UIA 发送失败，按配置回退鼠标发送 | receiver=%s", receiver)
+
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             _executor,
@@ -244,18 +265,72 @@ class WindowsSender(BaseMessageSender):
             target_id,
         )
 
+    async def _send_text_uia(
+        self,
+        msg: str,
+        receiver: str,
+        is_group: bool,
+        target_id: str,
+    ) -> bool:
+        if self._uia_sender is None:
+            from app.core.sender_windows_uia import WindowsUIASender
+
+            self._uia_sender = WindowsUIASender()
+        send_started_at = int(time.time()) - 2
+        sent = await self._uia_sender.send_text(
+            msg,
+            receiver,
+            is_group=is_group,
+            target_id=target_id,
+        )
+        if not sent or not self._verify_after_send:
+            return sent
+
+        loop = asyncio.get_running_loop()
+        verified = await loop.run_in_executor(
+            _executor,
+            self._verify_sent_text,
+            msg,
+            send_started_at,
+            target_id,
+        )
+        if not verified:
+            logger.error(
+                "UIA 已执行发送，但数据库回读未确认 | receiver=%s | target_id=%s",
+                receiver,
+                target_id,
+            )
+        return verified
+
     async def send_image(self, path: str, receiver: str) -> bool:
         logger.warning("Windows 平台暂不支持 send_image")
         return False
 
     async def is_wechat_running(self) -> bool:
         """检查微信进程是否在运行。"""
+        if self._method in {"uia", "uia_only", "uia-first"}:
+            if self._uia_sender is None:
+                from app.core.sender_windows_uia import WindowsUIASender
+
+                self._uia_sender = WindowsUIASender()
+            if await self._uia_sender.is_wechat_running():
+                return True
+            if not self._allow_mouse_fallback:
+                return False
         return self._find_wechat_window() is not None
 
     async def open_chat(self, receiver: str) -> bool:
         """打开指定聊天（用于发送后停靠）。"""
         if not receiver:
             return False
+        if self._method in {"uia", "uia_only", "uia-first"}:
+            if self._uia_sender is None:
+                from app.core.sender_windows_uia import WindowsUIASender
+
+                self._uia_sender = WindowsUIASender()
+            opened = await self._uia_sender.open_chat(receiver)
+            if opened or not self._allow_mouse_fallback:
+                return opened
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(_executor, self._open_chat_sync, receiver)
 
@@ -296,6 +371,8 @@ class WindowsSender(BaseMessageSender):
         """同步消息发送，在全局锁内执行。"""
         with self._gui_lock:
             try:
+                _prepare_mouse_for_gui()
+
                 # 检查微信是否在运行
                 if self._find_wechat_window() is None:
                     logger.error("未找到微信窗口")
@@ -352,6 +429,7 @@ class WindowsSender(BaseMessageSender):
         """同步打开聊天。"""
         with self._gui_lock:
             try:
+                _prepare_mouse_for_gui()
                 self._full_search(receiver, is_group=False)
                 self.reset_search_state()
                 return True

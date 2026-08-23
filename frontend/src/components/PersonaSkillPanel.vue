@@ -31,10 +31,16 @@
         </el-tag>
       </el-descriptions-item>
       <el-descriptions-item label="模式">
-        {{ persona.mode || 'contextual' }}
+        {{ modeLabel(persona.simulation_mode || persona.mode) }}
       </el-descriptions-item>
       <el-descriptions-item label="名称">
         {{ persona.meta?.name || '-' }}
+      </el-descriptions-item>
+      <el-descriptions-item label="目标 ID">
+        {{ persona.target_speaker_id || persona.meta?.target_speaker_id || '-' }}
+      </el-descriptions-item>
+      <el-descriptions-item label="历史样本">
+        {{ persona.meta?.replay_sample_size || 0 }} 组
       </el-descriptions-item>
     </el-descriptions>
 
@@ -45,6 +51,27 @@
       :closable="false"
       show-icon
     />
+    <div class="replay-settings">
+      <div class="settings-title">历史匹配参数</div>
+      <div class="settings-grid">
+        <el-form-item label="直接复用阈值">
+          <el-input-number v-model="replayConfig.direct_threshold" :min="0" :max="1" :step="0.01" :precision="2" controls-position="right" />
+        </el-form-item>
+        <el-form-item label="Few-shot 阈值">
+          <el-input-number v-model="replayConfig.few_shot_threshold" :min="0" :max="1" :step="0.01" :precision="2" controls-position="right" />
+        </el-form-item>
+        <el-form-item label="上下文条数">
+          <el-input-number v-model="replayConfig.context_messages" :min="1" :max="6" controls-position="right" />
+        </el-form-item>
+        <el-form-item label="参考样本数">
+          <el-input-number v-model="replayConfig.few_shot_count" :min="1" :max="8" controls-position="right" />
+        </el-form-item>
+        <el-form-item label="重复冷却（秒）">
+          <el-input-number v-model="replayConfig.repeat_cooldown" :min="0" :max="3600" controls-position="right" />
+        </el-form-item>
+        <el-button class="settings-save" :loading="loading" @click="saveReplayConfig">保存匹配参数</el-button>
+      </div>
+    </div>
     <div class="import-toolbar">
       <input
         ref="fileInput"
@@ -95,13 +122,24 @@
             :value="participant.id"
           />
         </el-select>
+        <div class="simulation-mode">
+          <div class="simulation-mode-label">模仿方式</div>
+          <el-radio-group v-model="simulationMode" size="small">
+            <el-radio-button label="persona">AI 人格</el-radio-button>
+            <el-radio-button label="replay">历史复用</el-radio-button>
+            <el-radio-button label="hybrid">混合模仿（推荐）</el-radio-button>
+          </el-radio-group>
+          <div class="mode-help">
+            {{ modeDescription }} 历史未命中：{{ missActionDescription }}
+          </div>
+        </div>
         <el-button
           type="primary"
           :loading="loading"
           :disabled="!selectedSpeakerId"
           @click="analyzeSelectedPersona"
         >
-          分析并模仿此人
+          {{ simulationMode === 'replay' ? '建立历史索引' : '分析并模仿此人' }}
         </el-button>
         <el-button :loading="loading" @click="removeImportedChat">删除导入数据</el-button>
       </div>
@@ -125,15 +163,17 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   analyzeImportedPersona,
   analyzePersona,
   clearPersona,
   deletePersonaImport,
+  getAIConfig,
   getPersona,
   importPersonaChatFiles,
+  updateAIConfig,
   updatePersona,
 } from '../api'
 
@@ -149,6 +189,7 @@ const editing = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const selectedFiles = ref<File[]>([])
 const selectedSpeakerId = ref('')
+const simulationMode = ref<'persona' | 'replay' | 'hybrid'>('hybrid')
 const importData = reactive<{
   import_id: string
   file_count: number
@@ -163,6 +204,8 @@ const importData = reactive<{
 const persona = reactive<any>({
   ready: false,
   mode: 'contextual',
+  simulation_mode: 'persona',
+  target_speaker_id: '',
   meta: {},
   self_memory: '',
   persona: '',
@@ -175,6 +218,36 @@ const form = reactive<any>({
   private_prompt: '',
   group_prompt: '',
 })
+const replayConfig = reactive({
+  direct_threshold: 0.82,
+  few_shot_threshold: 0.55,
+  context_messages: 3,
+  few_shot_count: 3,
+  repeat_cooldown: 20,
+})
+
+const modeDescriptions: Record<string, string> = {
+  persona: '需要 API Key，由 LLM 生成新回复。',
+  replay: '本地复用相似历史话术，没有可靠匹配时不回复。',
+  hybrid: '优先复用原话，再用历史表达参考或 Persona 回退。',
+}
+
+const modeDescription = computed(() => modeDescriptions[simulationMode.value])
+const missActionDescription = computed(() => {
+  if (simulationMode.value === 'replay') return '不回复'
+  if (simulationMode.value === 'hybrid') return '回退 Persona'
+  return '不使用历史匹配'
+})
+
+function normalizeMode(value: any): 'persona' | 'replay' | 'hybrid' {
+  if (value === 'replay' || value === 'hybrid') return value
+  return 'persona'
+}
+
+function modeLabel(value: any) {
+  const mode = normalizeMode(value)
+  return mode === 'replay' ? '历史话术复用' : mode === 'hybrid' ? '混合模仿' : 'AI 人格生成'
+}
 
 function syncForm() {
   Object.assign(form, {
@@ -186,9 +259,12 @@ function syncForm() {
 }
 
 function applyPersonaResult(data: any) {
+  simulationMode.value = normalizeMode(data.simulation_mode || data.mode)
   Object.assign(persona, {
     ready: true,
     mode: data.mode,
+    simulation_mode: simulationMode.value,
+    target_speaker_id: data.target_speaker_id || data.meta?.target_speaker_id || '',
     meta: data.meta,
     self_memory: data.self_memory,
     persona: data.persona,
@@ -204,6 +280,10 @@ async function loadPersona() {
   try {
     const res = await getPersona()
     Object.assign(persona, res.data)
+    simulationMode.value = res.data?.ready
+      ? normalizeMode(res.data?.simulation_mode || res.data?.mode)
+      : 'hybrid'
+    persona.target_speaker_id = res.data?.target_speaker_id || res.data?.meta?.target_speaker_id || ''
     syncForm()
     editing.value = false
   } catch {
@@ -211,6 +291,21 @@ async function loadPersona() {
   } finally {
     loading.value = false
   }
+}
+
+async function loadReplayConfig() {
+  try {
+    const res = await getAIConfig()
+    if (res.data?.persona_replay) Object.assign(replayConfig, res.data.persona_replay)
+  } catch {
+    // AI 配置读取失败时使用本地默认值。
+  }
+}
+
+async function saveReplayConfig(showMessage = true) {
+  const res = await updateAIConfig({ persona_replay: { ...replayConfig } })
+  if (showMessage) ElMessage.success('历史匹配参数已保存')
+  return res.data?.success !== false
 }
 
 function openFilePicker() {
@@ -249,14 +344,21 @@ async function analyzeSelectedPersona() {
   if (!importData.import_id || !selectedSpeakerId.value) return
   loading.value = true
   try {
+    await saveReplayConfig(false)
     const res = await analyzeImportedPersona({
       import_id: importData.import_id,
       speaker_id: selectedSpeakerId.value,
+      simulation_mode: simulationMode.value,
       force: true,
     })
     if (res.data?.success) {
       applyPersonaResult(res.data)
-      ElMessage.success(`已生成 ${res.data.meta?.name || '所选人物'} 的说话风格，样本 ${res.data.sample_size} 条`)
+      const replayCount = res.data.replay_sample_size || 0
+      ElMessage.success(
+        simulationMode.value === 'replay'
+          ? `已建立 ${res.data.meta?.name || '所选人物'} 的历史索引，共 ${replayCount} 组`
+          : `已生成 ${res.data.meta?.name || '所选人物'} 的模仿配置，样本 ${res.data.sample_size} 条`,
+      )
     } else {
       ElMessage.error(res.data?.error || '人物风格分析失败')
     }
@@ -276,7 +378,11 @@ async function removeImportedChat() {
       Object.assign(importData, { import_id: '', file_count: 0, total_messages: 0, participants: [] })
       selectedFiles.value = []
       selectedSpeakerId.value = ''
-      ElMessage.success('聊天记录导入已删除')
+      ElMessage.success(
+        res.data.replay_index_retained
+          ? '聊天记录导入已删除，已生成的历史索引仍保留'
+          : '聊天记录导入已删除',
+      )
     } else {
       ElMessage.error(res.data?.error || '删除导入数据失败')
     }
@@ -319,7 +425,8 @@ async function savePersonaEdit() {
   try {
     const res = await updatePersona({
       meta: persona.meta || {},
-      mode: persona.mode || 'contextual',
+      mode: simulationMode.value,
+      simulation_mode: simulationMode.value,
       self_memory: form.self_memory,
       persona: form.persona,
       private_prompt: form.private_prompt,
@@ -345,6 +452,8 @@ async function clearPersonaCache() {
     Object.assign(persona, {
       ready: false,
       mode: 'contextual',
+      simulation_mode: 'persona',
+      target_speaker_id: '',
       meta: {},
       self_memory: '',
       persona: '',
@@ -361,7 +470,9 @@ async function clearPersonaCache() {
   }
 }
 
-onMounted(loadPersona)
+onMounted(async () => {
+  await Promise.all([loadPersona(), loadReplayConfig()])
+})
 </script>
 
 <style scoped>
@@ -381,6 +492,35 @@ onMounted(loadPersona)
   margin-top: 14px;
 }
 
+.replay-settings {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 8px;
+}
+
+.settings-title {
+  margin-bottom: 10px;
+  color: var(--el-text-color-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.settings-grid {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.settings-grid :deep(.el-form-item) {
+  margin-bottom: 0;
+}
+
+.settings-save {
+  margin-bottom: 18px;
+}
+
 .file-summary {
   color: var(--el-text-color-secondary);
   font-size: 13px;
@@ -394,5 +534,25 @@ onMounted(loadPersona)
 
 .speaker-select {
   min-width: 320px;
+}
+
+.simulation-mode {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 420px;
+}
+
+.simulation-mode-label {
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.mode-help {
+  width: 100%;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
 }
 </style>

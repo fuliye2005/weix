@@ -73,8 +73,12 @@ def test_style_distiller_generates_contextual_skill_cache_without_raw_messages(
 
     assert result["self_memory_md"].startswith("## Self Memory")
     assert result["persona_md"].startswith("## Layer 0")
-    assert distiller.build_prompt(is_group=False) == payload["runtime_prompt_private"]
-    assert distiller.build_prompt(is_group=True) == payload["runtime_prompt_group"]
+    assert distiller.build_prompt(is_group=False).startswith(payload["runtime_prompt_private"])
+    assert "身份锚定" in distiller.build_prompt(is_group=False)
+    assert "风格校准" in distiller.build_prompt(is_group=False)
+    assert distiller.build_prompt(is_group=True).startswith(payload["runtime_prompt_group"])
+    assert "身份锚定" in distiller.build_prompt(is_group=True)
+    assert "风格校准" in distiller.build_prompt(is_group=True)
 
     saved = json.loads(cache_path.read_text(encoding="utf-8"))
     assert saved["version"] == CACHE_VERSION
@@ -99,16 +103,57 @@ def test_style_distiller_external_import_uses_selected_person_name_and_source(
             ["外部聊天样本一", "外部聊天样本二"],
             force=True,
             persona_name="选中的人",
+            target_speaker_id="wxid_selected",
             source="external_json",
         )
     )
 
     assert result["meta"]["name"] == "选中的人"
+    assert result["meta"]["target_speaker_id"] == "wxid_selected"
     assert result["meta"]["source"] == "external_json"
     assert "作为选中的人本人的微信镜像" in result["runtime_prompt_private"]
     assert "参考选中的人的说话风格" in result["runtime_prompt_group"]
     saved = cache_path.read_text(encoding="utf-8")
     assert "外部聊天样本一" not in saved
+
+
+def test_style_distiller_does_not_reuse_same_name_for_different_target_id(
+    tmp_path, monkeypatch
+):
+    class CountingLLM(DummyLLM):
+        def __init__(self, payload):
+            super().__init__(payload)
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            return super().invoke(messages)
+
+    llm = CountingLLM(_skill_payload())
+    monkeypatch.setattr("app.ai.style_distiller.create_llm", lambda _config=None: llm)
+    distiller = StyleDistiller(cache_path=tmp_path / "persona_skill.json")
+
+    asyncio.run(
+        distiller.analyze(
+            ["第一个人的消息"],
+            force=True,
+            persona_name="同名",
+            target_speaker_id="wxid_first",
+            source="external_json",
+        )
+    )
+    result = asyncio.run(
+        distiller.analyze(
+            ["第二个人的消息"],
+            force=False,
+            persona_name="同名",
+            target_speaker_id="wxid_second",
+            source="external_json",
+        )
+    )
+
+    assert llm.calls == 2
+    assert result["meta"]["target_speaker_id"] == "wxid_second"
 
 
 def test_style_distiller_ignores_broken_new_cache_and_can_reanalyze(tmp_path, monkeypatch):
@@ -215,7 +260,9 @@ def test_style_distiller_saves_manual_edits_without_raw_messages(tmp_path, monke
     assert result["meta"]["name"] == "手动版"
     assert saved["version"] == CACHE_VERSION
     assert saved["self_memory_md"] == "## Self Memory\n\n人工校准后的记忆"
-    assert saved["runtime_prompt_private"] == "私聊人工 prompt"
+    assert saved["runtime_prompt_private"].startswith("私聊人工 prompt")
+    assert "身份锚定" in saved["runtime_prompt_private"]
+    assert "风格校准" in saved["runtime_prompt_private"]
     assert "raw_messages" not in saved
 
 
@@ -273,5 +320,63 @@ def test_weix_agent_selects_private_or_group_persona_prompt():
         WeixAgent._distiller = FakeCachedDistiller()
         assert WeixAgent._get_persona_prompt(is_group=False) == "private-prompt"
         assert WeixAgent._get_persona_prompt(is_group=True) == "group-prompt"
+    finally:
+        WeixAgent._distiller = old_distiller
+
+def test_weix_agent_persona_overrides_default_qiqi_identity(monkeypatch):
+    from types import SimpleNamespace
+    import app.ai.agent as agent_module
+
+    captured = {}
+    monkeypatch.setattr(
+        agent_module,
+        "create_react_agent",
+        lambda **kwargs: captured.update(kwargs) or object(),
+    )
+    monkeypatch.setattr(
+        WeixAgent,
+        "_get_persona_prompt",
+        classmethod(lambda cls, is_group=False: "## 本人镜像模式\n你正在作为姚周辰本人的微信镜像回复。"),
+    )
+    monkeypatch.setattr(
+        "app.config.get_config",
+        lambda: SimpleNamespace(ai={"system_prompt": ""}),
+    )
+
+    agent = WeixAgent.__new__(WeixAgent)
+    agent.llm = object()
+    agent.tools = []
+    agent._checkpointer = object()
+    agent._create_agent(
+        "private:wxid_test_user",
+        False,
+        {
+            "is_group": False,
+            "user_name": "芙莉叶",
+            "user_wxid": "wxid_test_user",
+            "room_id": "",
+            "room_name": "",
+            "chat_context": "无历史对话",
+        },
+    )
+
+    prompt = captured["prompt"]
+    assert "姚周辰本人的微信镜像" in prompt
+    assert "你是「七七」" not in prompt
+    assert prompt.index("姚周辰本人的微信镜像") > prompt.index("安全规则")
+
+
+def test_identity_response_does_not_fall_back_to_assistant():
+    class FakeIdentityDistiller:
+        has_persona = True
+
+        def build_prompt(self, is_group: bool = False):
+            return "你正在作为姚周辰本人的微信镜像回复。"
+
+    old_distiller = WeixAgent._distiller
+    try:
+        WeixAgent._distiller = FakeIdentityDistiller()
+        assert WeixAgent._normalize_identity_response("你是谁", "我是一个聊天助手。") == "姚周辰啊，咋了？"
+        assert WeixAgent._normalize_identity_response("你是 AI 吗", "我是一个聊天助手。") == "我是一个聊天助手。"
     finally:
         WeixAgent._distiller = old_distiller

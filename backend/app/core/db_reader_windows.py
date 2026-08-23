@@ -579,11 +579,16 @@ class WindowsDBReader(BaseDBReader):
         通过扫描微信数据目录中 wxid_ 开头的文件夹获取。
         """
         configured = cls._configured_wxid()
-        for expanded in cls._get_data_dirs():
-            if configured:
+
+        # 优先使用配置中明确选择的账号。机器上可能同时存在旧版
+        # WeChat Files 和新版 xwechat_files，不能因为扫描顺序而选错账号。
+        if configured:
+            for expanded in cls._get_data_dirs():
                 selected_dir = os.path.join(expanded, configured)
                 if os.path.isdir(selected_dir):
                     return configured
+
+        for expanded in cls._get_data_dirs():
             try:
                 for entry in os.scandir(expanded):
                     if not entry.is_dir():
@@ -885,18 +890,24 @@ class WindowsDBReader(BaseDBReader):
             return None
 
         try:
-            row = self._sqlite_conn.execute(
-                "SELECT rowid FROM Name2Id WHERE user_name = ? LIMIT 1",
-                (current_wxid,),
-            ).fetchone()
-            if row:
-                self._current_sender_id = int(row["rowid"])
-                logger.debug(
-                    "Windows 当前账号 sender_id 已识别 | wxid=%s | rowid=%s",
-                    current_wxid,
-                    self._current_sender_id,
-                )
-                return self._current_sender_id
+            candidates = [current_wxid]
+            base_wxid = current_wxid.rsplit("_", 1)[0]
+            if base_wxid != current_wxid:
+                candidates.append(base_wxid)
+
+            for candidate in candidates:
+                row = self._sqlite_conn.execute(
+                    "SELECT rowid FROM Name2Id WHERE user_name = ? LIMIT 1",
+                    (candidate,),
+                ).fetchone()
+                if row:
+                    self._current_sender_id = int(row["rowid"])
+                    logger.debug(
+                        "Windows 当前账号 sender_id 已识别 | wxid=%s | rowid=%s",
+                        candidate,
+                        self._current_sender_id,
+                    )
+                    return self._current_sender_id
         except Exception as exc:
             logger.debug("识别 Windows 当前账号 sender_id 失败: %s", exc)
 

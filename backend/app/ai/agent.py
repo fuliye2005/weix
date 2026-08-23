@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -120,6 +121,7 @@ class WeixAgent:
         通过 checkpointer 的 thread_id 实现 session 隔离。
         """
         clean_context = {k: v for k, v in context.items() if k != "is_group"}
+        clean_context.setdefault("persona_replay_examples", "")
         system_template = get_prompt_for_context(
             is_group=is_group,
             current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -134,15 +136,19 @@ class WeixAgent:
             system_template,
             persona_mode=guard_mode,
         )
-        if persona_text:
-            system_template = system_template.rstrip() + "\n\n" + persona_text
-
         # 注入用户自定义 system prompt（前端 AIConfig 中配置）
         from app.config import get_config
         user_prompt = get_config().ai.get("system_prompt", "")
         if user_prompt and user_prompt.strip():
             system_template = system_template.rstrip() + "\n\n## 用户自定义\n" + user_prompt.strip()
 
+        if persona_text:
+            system_template = system_template.rstrip() + "\n\n" + persona_text
+            logger.info(
+                "Persona prompt injected | scene=%s | chars=%d",
+                "group" if is_group else "private",
+                len(persona_text),
+            )
         agent = create_react_agent(
             model=self.llm,
             tools=self.tools,
@@ -154,6 +160,61 @@ class WeixAgent:
     # ------------------------------------------------------------------
     # 消息处理
     # ------------------------------------------------------------------
+
+    @classmethod
+    def _normalize_identity_response(cls, message: str, output: str) -> str:
+        if not message or not output:
+            return output
+        if not re.search(r"(?:你是谁|你叫什么|你叫啥|你是哪位)", message):
+            return output
+        if re.search(r"(?:AI|人工智能|机器人|复制品|数字镜像|数字人)", message, re.IGNORECASE):
+            return output
+        if not re.search(r"(?:聊天助手|微信助手|智能助手|客服|语言模型|AI|人工智能|机器人|复制品|数字镜像|非本人|七七)", output, re.IGNORECASE):
+            return output
+
+        persona_prompt = cls._get_persona_prompt(is_group=False)
+        match = re.search(r"(?:作为|以)\s*(.+?)\s*本人(?:的|身份)", persona_prompt)
+        if not match:
+            return output
+        name = match.group(1).strip("「」\" ")
+        if not name or name == "我":
+            return output
+        return f"{name}啊，咋了？"
+
+    async def _finalize_output(
+        self,
+        message: str,
+        output: str,
+        session_id: str,
+        allow_llm: bool = True,
+    ) -> str:
+        """Apply common output checks and memory persistence for all strategies."""
+        from app.ai.guard import check_output_safety
+
+        normalized_output = self._normalize_identity_response(message, output)
+        if normalized_output != output:
+            logger.warning(
+                "Replaced assistant-style identity answer with persona identity | session=%s",
+                session_id,
+            )
+            output = normalized_output
+
+        if not check_output_safety(output):
+            logger.warning("AI output safety check failed: session=%s", session_id)
+
+        self.memory.record_turn(session_id, message, output)
+        if self._rag is not None and output:
+            try:
+                is_dup = await self._rag.check_duplicate_and_remember(session_id, output)
+                if is_dup:
+                    logger.info("Similar response detected for session=%s", session_id)
+            except Exception:
+                pass
+
+        if allow_llm:
+            await self.memory.maybe_summarize(session_id)
+        self._save_checkpoints()
+        return output
 
     async def chat(
         self,
@@ -193,6 +254,52 @@ class WeixAgent:
         context.setdefault("room_name", context.get("room_name", ""))
         context.setdefault("room_id", room_id)
         context.setdefault("chat_context", "无历史对话")
+        context.setdefault("persona_replay_examples", "")
+
+        simulation_mode = self._get_simulation_mode()
+        replay_result: dict[str, Any] | None = None
+        replay_engine = None
+        if simulation_mode in {"replay", "hybrid"}:
+            replay_engine = self._get_replay_engine()
+            if replay_engine is not None:
+                replay_result = replay_engine.match(
+                    message=safe_message,
+                    recent_context=context.get("chat_context"),
+                    is_group=is_group,
+                    session_id=session_id,
+                    sender_id=str(user_wxid or ""),
+                    room_id=str(room_id or ""),
+                )
+            else:
+                replay_result = {"direct": None, "few_shot": []}
+            direct_match = replay_result.get("direct")
+            if isinstance(direct_match, dict) and direct_match.get("reply"):
+                replay_reply = str(direct_match["reply"]).strip()
+                output = await self._finalize_output(
+                    message,
+                    replay_reply,
+                    session_id,
+                    allow_llm=False,
+                )
+                if replay_engine is not None:
+                    replay_engine.remember_reply(session_id, output)
+                logger.info(
+                    "Replay response selected | session=%s | score=%s",
+                    session_id,
+                    direct_match.get("score"),
+                )
+                return output
+
+            if simulation_mode == "replay":
+                logger.info(
+                    "Replay mode found no direct match; skip response | session=%s",
+                    session_id,
+                )
+                return ""
+
+            few_shot = replay_result.get("few_shot") if replay_result else []
+            if few_shot and replay_engine is not None:
+                context["persona_replay_examples"] = replay_engine.format_few_shot(few_shot)
 
         # RAG 检索增强上下文
         self._ensure_rag()
@@ -234,31 +341,13 @@ class WeixAgent:
                 )
 
                 output = self._extract_output(result)
-
-                if not check_output_safety(output):
-                    logger.warning(f"AI output safety check failed: session={session_id}")
+                output = await self._finalize_output(message, output, session_id)
+                if simulation_mode == "hybrid" and replay_engine is not None:
+                    replay_engine.remember_reply(session_id, output)
 
                 logger.info(
                     f"Chat success: session={session_id}, output_len={len(output)}, attempt={attempt}"
                 )
-
-                # 记录对话轮次
-                self.memory.record_turn(session_id, message, output)
-
-                # AI 自省去重检查 + 记住回复
-                if self._rag is not None and output:
-                    try:
-                        is_dup = await self._rag.check_duplicate_and_remember(session_id, output)
-                        if is_dup:
-                            logger.info(f"Similar response detected for session={session_id}")
-                    except Exception:
-                        pass
-
-                # 自动摘要触发
-                await self.memory.maybe_summarize(session_id)
-
-                # 持久化 checkpoint
-                self._save_checkpoints()
 
                 return output
 
@@ -404,6 +493,43 @@ class WeixAgent:
     # ------------------------------------------------------------------
 
     _distiller = None
+    _replay_engine = None
+
+    @classmethod
+    def _get_replay_engine(cls):
+        """Return the cached local replay engine."""
+        if cls._replay_engine is None:
+            try:
+                from app.ai.persona_replay import PersonaReplayEngine
+
+                cls._replay_engine = PersonaReplayEngine()
+            except Exception as exc:
+                logger.warning("Replay engine initialization failed: %s", exc)
+                return None
+        return cls._replay_engine
+
+    @classmethod
+    def _get_simulation_mode(cls) -> str:
+        """Read the persisted simulation mode with contextual-cache compatibility."""
+        try:
+            from app.ai.persona_replay import normalize_simulation_mode
+
+            if cls._distiller is None:
+                from app.ai.style_distiller import StyleDistiller
+
+                cls._distiller = StyleDistiller(initialize_llm=False)
+            distiller_mode = getattr(cls._distiller, "simulation_mode", None)
+            if getattr(cls._distiller, "has_persona", False):
+                return normalize_simulation_mode(distiller_mode or cls._distiller.mode)
+
+            from app.config import get_config
+
+            ai_config = get_config().ai
+            configured_mode = ai_config.get("persona_mode", "persona") if isinstance(ai_config, dict) else "persona"
+            return normalize_simulation_mode(configured_mode)
+        except Exception as exc:
+            logger.debug("Unable to read simulation mode, using persona: %s", exc)
+            return "persona"
 
     @classmethod
     def _get_persona_prompt(cls, is_group: bool = False) -> str:
@@ -411,7 +537,7 @@ class WeixAgent:
         if cls._distiller is None:
             try:
                 from app.ai.style_distiller import StyleDistiller
-                cls._distiller = StyleDistiller()
+                cls._distiller = StyleDistiller(initialize_llm=False)
             except Exception:
                 return ""
 

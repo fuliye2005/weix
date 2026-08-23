@@ -69,6 +69,7 @@ export const importPersonaChatFiles = (files: File[]) => {
 export const analyzeImportedPersona = (data: {
   import_id: string
   speaker_id: string
+  simulation_mode?: 'persona' | 'replay' | 'hybrid'
   force?: boolean
 }) => api.post('/persona/import/analyze', data)
 export const deletePersonaImport = (importId: string) => api.delete(`/persona/import/${importId}`)

@@ -39,6 +39,11 @@ def test_parse_wechat_export_filters_non_text_and_group_sender():
                 "content": "图片说明不应进入样本",
             },
             {
+                "senderUsername": "wxid_alice",
+                "senderDisplayName": "Alice",
+                "content": "对方撤回了一条消息",
+            },
+            {
                 "type": 1,
                 "renderType": "text",
                 "senderUsername": "wxid_bob",
@@ -56,14 +61,38 @@ def test_parse_wechat_export_filters_non_text_and_group_sender():
             "speaker_name": "Alice",
             "content": "第一条",
             "source_file": "one.json",
+            "conversation_id": "room@chatroom",
+            "is_group": True,
         },
         {
             "speaker_id": "wxid_bob",
             "speaker_name": "wxid_bob",
             "content": "没有显示名时仍保留稳定 ID",
             "source_file": "one.json",
+            "conversation_id": "room@chatroom",
+            "is_group": True,
         },
     ]
+
+
+def test_top_level_conversation_metadata_is_inherited_without_record_fields():
+    messages = parse_chat_payload(
+        {
+            "conversation": {"username": "friend_id", "isGroup": False},
+            "messages": [
+                {
+                    "type": 1,
+                    "senderUsername": "wxid_friend",
+                    "senderDisplayName": "朋友",
+                    "content": "没有逐条会话字段",
+                }
+            ],
+        },
+        source_file="private.json",
+    )
+
+    assert messages[0]["conversation_id"] == "friend_id"
+    assert messages[0]["is_group"] is False
 
 
 def test_same_person_is_aggregated_across_multiple_files(tmp_path, monkeypatch):

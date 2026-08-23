@@ -68,6 +68,8 @@ class AutoReplyPipeline:
         else:
             sender_cfg = get_config().windows_sender if hasattr(get_config(), "windows_sender") else {}
             self._park_after_send = sender_cfg.get("park_after_send", False)
+            if sender_cfg.get("background_mode", False):
+                self._park_after_send = False
             self._parking_receiver = sender_cfg.get("parking_receiver", "")
 
     # ------------------------------------------------------------------

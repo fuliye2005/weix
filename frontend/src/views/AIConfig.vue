@@ -94,7 +94,7 @@
                 <template #title><div class="collapse-title"><el-icon><User /></el-icon><span>Persona 参数</span><small>聊天风格分析使用</small></div></template>
                 <div class="form-grid three-columns advanced-grid">
                   <el-form-item label="Persona 模式">
-                    <el-input v-model="form.persona_mode" placeholder="contextual" @input="syncJsonFromForm" />
+                    <el-input v-model="form.persona_mode" placeholder="persona" @input="syncJsonFromForm" />
                   </el-form-item>
                   <el-form-item label="回溯天数">
                     <el-input-number v-model="form.persona_since_days" :min="1" :max="3650" :step="30" controls-position="right" style="width: 100%" @change="syncJsonFromForm" />
@@ -202,7 +202,7 @@ const form = reactive<AnyRecord>({
   model: '',
   temperature: 0.7,
   max_tokens: 2000,
-  persona_mode: 'contextual',
+  persona_mode: 'persona',
   persona_since_days: 90,
   persona_message_limit: 3000,
   persona_import_max_mb: 256,

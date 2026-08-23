@@ -16,6 +16,7 @@ DEFAULT_MAX_IMPORT_MB = 256
 MAX_IMPORT_BYTES = DEFAULT_MAX_IMPORT_MB * 1024 * 1024
 MAX_IMPORT_MESSAGES = 100_000
 _IMPORT_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+_RETRACTION_RE = re.compile(r"(?:撤回了一条消息|撤回消息|消息已撤回|已撤回)")
 
 
 def get_import_max_bytes() -> int | None:
@@ -34,7 +35,7 @@ def get_import_max_bytes() -> int | None:
 def parse_chat_payload(
     payload: Any,
     source_file: str | None = None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Normalize a chat export into stable speaker/content records.
 
     The WeChat export format uses ``senderUsername`` as the stable person ID
@@ -43,9 +44,17 @@ def parse_chat_payload(
     data; it is never interpreted as an instruction.
     """
     records = _find_records(payload)
-    normalized: list[dict[str, str]] = []
+    conversation = payload.get("conversation") if isinstance(payload, dict) else {}
+    conversation = conversation if isinstance(conversation, dict) else {}
+    default_conversation_id = _extract_text(
+        _first_value(conversation, ("username", "conversationUsername", "id"))
+    )
+    default_is_group = _coerce_bool(
+        _first_value(conversation, ("isGroup", "is_group", "group"))
+    )
+    normalized: list[dict[str, Any]] = []
 
-    for record in records:
+    for source_index, record in enumerate(records):
         if len(normalized) >= MAX_IMPORT_MESSAGES:
             break
         if not isinstance(record, dict) or not _is_text_record(record):
@@ -107,7 +116,7 @@ def parse_chat_payload(
                 ("content", "text", "message", "body", "msg_content"),
             )
         )
-        if not content:
+        if not content or _RETRACTION_RE.search(content):
             continue
 
         normalized_record = {
@@ -115,14 +124,42 @@ def parse_chat_payload(
             "speaker_name": speaker_name,
             "content": content,
         }
+        if _first_value(
+            record,
+            ("sortSeq", "sort_seq", "localId", "local_id", "serverId", "server_id", "id"),
+        ) not in (None, "", []):
+            normalized_record["source_index"] = source_index
         if source_file:
             normalized_record["source_file"] = source_file
+        conversation_id = _extract_text(
+            _first_value(record, ("conversationUsername", "conversation_id", "room_id"))
+        )
+        if not conversation_id:
+            conversation_id = default_conversation_id
+        if conversation_id:
+            normalized_record["conversation_id"] = conversation_id
+        is_group = _coerce_bool(
+            _first_value(record, ("isGroup", "is_group", "group"))
+        )
+        if is_group is None:
+            is_group = default_is_group
+        if is_group is not None:
+            normalized_record["is_group"] = is_group
+        message_id = _extract_text(_first_value(record, ("id", "message_id", "msg_id")))
+        if message_id:
+            normalized_record["message_id"] = message_id
+        timestamp = _first_value(
+            record,
+            ("sortSeq", "sort_seq", "createTime", "create_time", "timestamp", "time"),
+        )
+        if timestamp not in (None, "", []):
+            normalized_record["timestamp"] = timestamp
         normalized.append(normalized_record)
 
     return normalized
 
 
-def summarize_participants(messages: list[dict[str, str]]) -> list[dict[str, Any]]:
+def summarize_participants(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return stable-ID participants sorted by message count and display name."""
     counts: Counter[str] = Counter()
     names: dict[str, str] = {}
@@ -157,7 +194,7 @@ def summarize_participants(messages: list[dict[str, str]]) -> list[dict[str, Any
     ]
 
 
-def create_import(messages: list[dict[str, str]]) -> str:
+def create_import(messages: list[dict[str, Any]]) -> str:
     """Persist normalized messages and return a safe opaque import identifier."""
     import_id = uuid4().hex
     path = _import_path(import_id)
@@ -165,7 +202,7 @@ def create_import(messages: list[dict[str, str]]) -> str:
     path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "messages": messages,
             },
             ensure_ascii=False,
@@ -175,7 +212,7 @@ def create_import(messages: list[dict[str, str]]) -> str:
     return import_id
 
 
-def load_import(import_id: str) -> list[dict[str, str]]:
+def load_import(import_id: str) -> list[dict[str, Any]]:
     """Load a previously imported normalized chat dataset."""
     path = _import_path(import_id)
     if not path.exists():
@@ -188,7 +225,7 @@ def load_import(import_id: str) -> list[dict[str, str]]:
     if not isinstance(messages, list):
         raise ValueError("聊天记录导入文件格式无效")
 
-    normalized: list[dict[str, str]] = []
+    normalized: list[dict[str, Any]] = []
     for item in messages[:MAX_IMPORT_MESSAGES]:
         if not isinstance(item, dict):
             continue
@@ -207,6 +244,15 @@ def load_import(import_id: str) -> list[dict[str, str]]:
         source_file = str(item.get("source_file") or "").strip()
         if source_file:
             record["source_file"] = source_file
+        for key in (
+            "source_index",
+            "conversation_id",
+            "is_group",
+            "message_id",
+            "timestamp",
+        ):
+            if key in item and item[key] not in (None, ""):
+                record[key] = item[key]
         normalized.append(record)
     return normalized
 
@@ -258,11 +304,24 @@ def _looks_like_message(record: dict[str, Any]) -> bool:
 
 def _is_text_record(record: dict[str, Any]) -> bool:
     """Filter WeChat system/media records while keeping generic text exports."""
+    if record.get("isSystem") is True or record.get("is_system") is True:
+        return False
+
+    message_kind = str(
+        record.get("msg_type") or record.get("message_type") or record.get("kind") or ""
+    ).strip().casefold()
+    if message_kind:
+        if message_kind in {"system", "image", "voice", "video", "file", "sticker", "emoji"}:
+            return False
+        if message_kind in {"text", "plain", "txt", "1"}:
+            return True
+
     if "type" in record and record.get("type") not in (None, ""):
         try:
             return int(record["type"]) == 1
         except (TypeError, ValueError):
-            return str(record["type"]).strip() == "1"
+            message_type = str(record["type"]).strip().casefold()
+            return message_type in {"1", "text", "plain", "txt"}
 
     render_type = str(record.get("renderType") or "").strip().casefold()
     if render_type:
@@ -305,6 +364,21 @@ def _extract_text(value: Any) -> str:
     if isinstance(value, list):
         return "".join(_extract_text(item) for item in value).strip()
     return ""
+
+
+def _coerce_bool(value: Any) -> bool | None:
+    if value in (None, "", []):
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    normalized = str(value).strip().casefold()
+    if normalized in {"true", "1", "yes", "y", "group"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "private"}:
+        return False
+    return None
 
 
 def _import_path(import_id: str) -> Path:

@@ -20,7 +20,7 @@ SKILL = {
 class FakeDistiller:
     cleared = False
 
-    def __init__(self):
+    def __init__(self, **_kwargs):
         self.has_persona = True
         self.mode = "contextual"
         self.meta = SKILL["meta"]

@@ -43,6 +43,7 @@ class PersonaUpdateRequest(BaseModel):
     private_prompt: str = ""
     group_prompt: str = ""
     mode: str = "contextual"
+    simulation_mode: str = ""
 
 
 class PersonaImportAnalyzeRequest(BaseModel):
@@ -50,6 +51,7 @@ class PersonaImportAnalyzeRequest(BaseModel):
 
     import_id: str
     speaker_id: str
+    simulation_mode: str = "persona"
     force: bool = True
 
 
@@ -58,7 +60,7 @@ async def get_persona():
     """获取当前缓存的 persona skill。"""
     try:
         from app.ai.style_distiller import StyleDistiller
-        d = StyleDistiller()
+        d = StyleDistiller(initialize_llm=False)
         if d.has_persona:
             return {
                 "ready": True,
@@ -109,7 +111,13 @@ async def analyze_persona(force: bool = False):
             )
             return {"success": False, "error": message}
 
-        reader = platform.db_reader.__class__()
+        platform_reader = getattr(platform, "db_reader", None)
+        if platform_reader is not None:
+            reader = platform_reader.__class__()
+        else:
+            from app.core.db_reader_macos import MacOSDBReader
+
+            reader = MacOSDBReader()
         all_dbs = reader.find_database_files()
 
         msg_db_path = None
@@ -160,6 +168,7 @@ async def analyze_persona(force: bool = False):
             "total_messages": len(raw_messages),
             "sample_size": sample_size,
             "mode": persona.get("mode", "contextual"),
+            "simulation_mode": persona.get("simulation_mode", "persona"),
             "meta": meta,
             "self_memory": persona.get("self_memory_md", ""),
             "persona": persona.get("persona_md", ""),
@@ -247,10 +256,12 @@ async def analyze_imported_persona(payload: PersonaImportAnalyzeRequest):
     """分析外部导入中指定稳定 ID 的人物消息。"""
     try:
         from app.ai.chat_import import load_import, summarize_participants
+        from app.ai.persona_replay import build_replay_index, normalize_simulation_mode
         from app.ai.style_distiller import StyleDistiller
 
         messages = load_import(payload.import_id)
         speaker_id = payload.speaker_id.strip()
+        simulation_mode = normalize_simulation_mode(payload.simulation_mode)
         selected_messages = [
             item
             for item in messages
@@ -271,17 +282,53 @@ async def analyze_imported_persona(payload: PersonaImportAnalyzeRequest):
             return {"success": False, "error": "所选人物不存在或导入已损坏"}
 
         contents = [item["content"] for item in selected_messages]
-        distiller = StyleDistiller()
-        persona = await distiller.analyze(
-            contents,
-            force=payload.force,
-            persona_name=participant["name"],
-            source="external_json",
-        )
+        replay_stats: dict = {}
+        if simulation_mode in {"replay", "hybrid"}:
+            ai_config = get_config().ai if isinstance(get_config().ai, dict) else {}
+            replay_config = ai_config.get("persona_replay", {})
+            replay_config = replay_config if isinstance(replay_config, dict) else {}
+            replay_index = build_replay_index(
+                messages,
+                target_speaker_id=speaker_id,
+                target_name=participant["name"],
+                context_messages=int(replay_config.get("context_messages", 3) or 3),
+            )
+            replay_stats = replay_index.get("meta", {})
+
+        if simulation_mode == "replay":
+            distiller = StyleDistiller(initialize_llm=False)
+            persona = distiller.build_replay_skill(
+                persona_name=participant["name"],
+                target_speaker_id=speaker_id,
+                replay_stats=replay_stats,
+                source="external_json",
+            )
+        else:
+            distiller = StyleDistiller()
+            persona = await distiller.analyze(
+                contents,
+                force=payload.force,
+                mode=simulation_mode,
+                persona_name=participant["name"],
+                target_speaker_id=speaker_id,
+                source="external_json",
+            )
+            persona = distiller.set_simulation_mode(
+                simulation_mode,
+                meta_updates={
+                    "target_speaker_id": speaker_id,
+                    "replay_sample_size": int(replay_stats.get("sample_count") or 0),
+                    "replay_unique_reply_count": int(
+                        replay_stats.get("unique_reply_count") or 0
+                    ),
+                    "replay_source_files": replay_stats.get("source_files", []),
+                },
+            )
 
         from app.ai.agent import WeixAgent
 
         WeixAgent._distiller = None
+        WeixAgent._replay_engine = None
         logger.info(
             "External persona skill updated for %s; WeixAgent distiller cache reset",
             speaker_id,
@@ -292,15 +339,19 @@ async def analyze_imported_persona(payload: PersonaImportAnalyzeRequest):
         return {
             "success": True,
             "speaker_id": speaker_id,
+            "simulation_mode": persona.get("simulation_mode", simulation_mode),
             "total_messages": len(selected_messages),
             "import_total_messages": len(messages),
             "sample_size": sample_size,
+            "persona_sample_size": sample_size,
+            "replay_sample_size": int(replay_stats.get("sample_count") or persona.get("meta", {}).get("replay_sample_size", 0) or 0),
             "mode": persona.get("mode", "contextual"),
             "meta": meta,
             "self_memory": persona.get("self_memory_md", ""),
             "persona": persona.get("persona_md", ""),
             "private_prompt": persona.get("runtime_prompt_private", ""),
             "group_prompt": persona.get("runtime_prompt_group", ""),
+            "target_speaker_id": meta.get("target_speaker_id", speaker_id),
         }
     except (FileNotFoundError, ValueError) as exc:
         return {"success": False, "error": str(exc)}
@@ -314,11 +365,18 @@ async def delete_persona_import(import_id: str):
     """删除外部聊天导入，避免原始聊天内容长期留在本地。"""
     try:
         from app.ai.chat_import import delete_import
+        from app.ai.persona_replay import get_replay_index_path
 
         deleted = delete_import(import_id)
+        replay_index_retained = get_replay_index_path().exists()
         return {
             "success": deleted,
-            "message": "聊天记录导入已删除" if deleted else "聊天记录导入不存在或已过期",
+            "replay_index_retained": replay_index_retained,
+            "message": (
+                "聊天记录导入已删除；已生成的历史复用索引仍保留"
+                if deleted
+                else "聊天记录导入不存在或已过期"
+            ),
         }
     except ValueError as exc:
         return {"success": False, "error": str(exc)}
@@ -332,24 +390,31 @@ async def update_persona(payload: PersonaUpdateRequest):
     """保存人工编辑后的 persona skill。"""
     try:
         from app.ai.style_distiller import StyleDistiller
-        d = StyleDistiller()
+        d = StyleDistiller(initialize_llm=False)
+        save_kwargs = {
+            "self_memory_md": payload.self_memory,
+            "persona_md": payload.persona,
+            "runtime_prompt_private": payload.private_prompt,
+            "runtime_prompt_group": payload.group_prompt,
+            "meta": payload.meta,
+            "mode": payload.mode,
+        }
+        if payload.simulation_mode:
+            save_kwargs["simulation_mode"] = payload.simulation_mode
         skill = d.save_edits(
-            self_memory_md=payload.self_memory,
-            persona_md=payload.persona,
-            runtime_prompt_private=payload.private_prompt,
-            runtime_prompt_group=payload.group_prompt,
-            meta=payload.meta,
-            mode=payload.mode,
+            **save_kwargs,
         )
 
         from app.ai.agent import WeixAgent
         WeixAgent._distiller = None
+        WeixAgent._replay_engine = None
         logger.info("Persona skill manually updated; WeixAgent distiller cache reset")
 
         return {
             "success": True,
             "ready": True,
             "mode": skill.get("mode", "contextual"),
+            "simulation_mode": skill.get("simulation_mode", "persona"),
             "meta": skill.get("meta", {}),
             "self_memory": skill.get("self_memory_md", ""),
             "persona": skill.get("persona_md", ""),
@@ -366,11 +431,19 @@ async def clear_persona():
     """清除缓存的 persona，恢复默认 AI 风格。"""
     try:
         from app.ai.style_distiller import StyleDistiller
-        d = StyleDistiller()
+        d = StyleDistiller(initialize_llm=False)
         d.clear_cache()
+        from app.ai.persona_replay import PersonaReplayEngine
+
+        replay_cleared = PersonaReplayEngine().clear()
         # 同时清除 agent 类缓存
         from app.ai.agent import WeixAgent
         WeixAgent._distiller = None
-        return {"success": True, "message": "Persona 已清除，将恢复默认风格"}
+        WeixAgent._replay_engine = None
+        return {
+            "success": True,
+            "replay_cleared": replay_cleared,
+            "message": "Persona 和历史复用索引已清除，将恢复默认风格",
+        }
     except Exception as exc:
         return {"success": False, "error": str(exc)}

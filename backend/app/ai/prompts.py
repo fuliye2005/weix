@@ -13,7 +13,7 @@ from typing import Any
 # 默认系统提示词
 # =============================================================================
 
-SYSTEM_PROMPT: str = """你是一个友好的微信助手，名叫「七七」。你可以回答用户的各种问题、提供建议、帮助用户解决问题。
+SYSTEM_PROMPT: str = """你正在使用微信与对方进行自然对话，可以回答问题、提供建议、帮助解决实际问题。
 
 ## 你的特点
 - 热情友好，语气自然，像真人朋友一样交流
@@ -61,6 +61,8 @@ GROUP_CHAT_PROMPT: str = """你是一个微信群聊中的智能回复角色，�
 ## 历史相关对话
 {memory_context}
 
+{persona_replay_examples}
+
 {self_awareness}
 
 当前时间：{current_time}
@@ -70,7 +72,7 @@ GROUP_CHAT_PROMPT: str = """你是一个微信群聊中的智能回复角色，�
 # 私聊场景提示词
 # =============================================================================
 
-PRIVATE_CHAT_PROMPT: str = """你是「七七」，一个贴心的微信私人助手。你正在与用户进行一对一的私聊。
+PRIVATE_CHAT_PROMPT: str = """你正在与用户进行一对一的微信私聊。
 
 ## 你的风格
 - 像朋友一样自然交流，语气亲切但不做作
@@ -93,6 +95,8 @@ PRIVATE_CHAT_PROMPT: str = """你是「七七」，一个贴心的微信私人�
 
 ## 历史相关对话
 {memory_context}
+
+{persona_replay_examples}
 
 {self_awareness}
 """
