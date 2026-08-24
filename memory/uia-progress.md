@@ -40,6 +40,7 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 - [x] 确认群聊解析失败时仍需要保留可诊断的 fallback，不能把 fallback 当作真实成员名称。
 - [x] 确认旧版群消息正文可能包含 `wxid_xxx:\n` 形式的发送者前缀，并已加入清理逻辑。
 - [x] `messages` 表已增加入站/出站方向、发送状态、尝试 ID、关联消息、错误阶段和数据库验证字段。
+- [x] 消息日志 API 会修复历史群聊记录中的发送者前缀和“群 ID 冒充发送者”问题；前端分别展示群名、成员 ID、回复关联和出站失败阶段。
 - [x] 确认已有 SQLite 数据库不能仅依赖 `create_all()` 自动增加新字段。
 - [x] 确认 Python 3.12 虚拟环境位于 `D:\Wechat_bot\weix\venv`。
 - [x] 确认 Python 3.13 环境调用 `_prepare_windows_imports()` 后可以找到 `win32ui`，问题重点在启动环境和导入路径。
@@ -61,10 +62,10 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 以下项目仍未完成或尚未得到真实运行验证：
 
 - [x] 增加数据库验证，按 `target_id` 和正文哈希确认发送成功消息已经写入本地消息记录；未及时落盘时进入 `pending_verify`，后台只查库，不重复发送。
-- [ ] 增加多账号绑定、账号选择和账号在线状态的完整验证。
+- [x] 增加多账号选择、选中账号/绑定账号/PID 绑定和在线状态返回；多进程未选账号时启动会拒绝猜测。
 - [x] 在测试账号上完成前台 UIA、后台 `InvokePattern` 和后台 `LegacyIAccessible.DoDefaultAction` 的隔离测试；三种路径都未确认实际发出消息。
 - [ ] 完成真实微信私聊和群聊发送验证，并取得 UI、数据库和对端可见的闭环证据。
-- [ ] 验证多开微信时，UIA 诊断和发送器始终绑定到所选账号的 PID，不误操作其他账号。
+- [x] 通过单元测试验证多开微信时，UIA 诊断和发送器拒绝未知 PID、账号不匹配和窗口 PID 不一致。
 - [ ] 验证发送失败、窗口关闭、会话切换和微信升级后的错误阶段与恢复行为。
 
 ## 技术实施顺序
@@ -140,10 +141,11 @@ UIA Pattern 调用成功不等于消息已经落盘。系统先记录 `invoke` �
 - UIA 诊断、PID 解析和平台接口定向测试：通过，`6 passed`。
 - UIA 检测界面前端构建：通过；Vite 仅报告已有的大 chunk 警告。
 - Windows 数据目录、临时清理和截图测试已完成隔离修复，不再依赖宿主机真实微信目录或污染后续测试。
-- 后端全量测试：`137 passed, 4 skipped`；4 个跳过项是默认关闭的真实微信集成测试，设置 `WEIX_RUN_LIVE_WECHAT_TESTS=1` 才会运行。
+- 后端全量测试：`154 passed, 4 skipped`；4 个跳过项是默认关闭的真实微信集成测试，设置 `WEIX_RUN_LIVE_WECHAT_TESTS=1` 才会运行。
 - Windows 真实机器只读验证：数据库诊断 `result: ok`（210 条消息、177 条文本消息）；UIA 绑定账号/PID/窗口 PID 一致；最大化后搜索框和会话列表可见；通过 UIA 打开“文件传输助手”成功；ValuePattern 草稿写入、回读、清空成功。
 - Windows 真实发送隔离验证：前台 UIA 测试 `Weix UIA 焦点修复测试 2026-08-24 21:06:19` 返回 `send_not_accepted`；后台 `InvokePattern` 测试 `Weix 后台 UIA 静默发送测试 2026-08-24 21:19:56` 返回 `background_input_state_changed`；后台 Legacy 测试 `Weix Legacy 后台 UIA 测试 2026-08-24 21:26:38` 未抢前台但未发送。ValuePattern 对照实验写入成功但会前置窗口。
 - UIA 真实发送和数据库回读闭环：尚未完成，仍不能据此宣称真实发送已完成。
+- 消息日志和多账号状态改造后的全量回归：`154 passed, 4 skipped`；前端 `npm run build` 通过，Vite 仅报告已有的大 chunk 警告。
 
 ## 最近提交
 
