@@ -1065,6 +1065,100 @@ class WindowsUIASender:
             summary["LegacyIAccessible"] = False
         return summary
 
+    @staticmethod
+    def _control_diagnostics(control: Any) -> dict[str, Any] | None:
+        """Return read-only UIA metadata useful for diagnosing custom Qt controls."""
+        if control is None:
+            return None
+
+        def read(name: str, default: Any = "") -> Any:
+            try:
+                value = getattr(control, name)
+                return value() if callable(value) else value
+            except Exception:
+                return default
+
+        rect = read("BoundingRectangle", None)
+        rectangle = None
+        if rect is not None:
+            rectangle = {
+                key: read_rect
+                for key, read_rect in (
+                    ("left", getattr(rect, "left", None)),
+                    ("top", getattr(rect, "top", None)),
+                    ("right", getattr(rect, "right", None)),
+                    ("bottom", getattr(rect, "bottom", None)),
+                )
+                if read_rect is not None
+            }
+
+        clickable_point = None
+        try:
+            point_data = control.GetClickablePoint()
+            if len(point_data) == 3:
+                point_x, point_y, available = point_data
+            else:
+                point, available = point_data
+                point_x = getattr(point, "x", 0)
+                point_y = getattr(point, "y", 0)
+            clickable_point = {
+                "available": bool(available),
+                "x": int(point_x),
+                "y": int(point_y),
+            }
+        except Exception:
+            pass
+
+        legacy: dict[str, Any] | None = None
+        try:
+            pattern = control.GetLegacyIAccessiblePattern()
+            if pattern is not None:
+                legacy = {}
+                for name in (
+                    "Name",
+                    "DefaultAction",
+                    "Role",
+                    "State",
+                    "ChildId",
+                    "Value",
+                    "Description",
+                    "Help",
+                    "KeyboardShortcut",
+                ):
+                    try:
+                        legacy[name[0].lower() + name[1:]] = getattr(pattern, name)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        runtime_id = None
+        try:
+            runtime_id = list(control.GetRuntimeId())
+        except Exception:
+            pass
+
+        return {
+            "name": str(read("Name", "") or ""),
+            "automation_id": str(read("AutomationId", "") or ""),
+            "control_type": str(read("ControlTypeName", "") or ""),
+            "localized_control_type": str(read("LocalizedControlType", "") or ""),
+            "class_name": str(read("ClassName", "") or ""),
+            "framework_id": str(read("FrameworkId", "") or ""),
+            "provider_description": str(read("ProviderDescription", "") or ""),
+            "native_window_handle": int(read("NativeWindowHandle", 0) or 0),
+            "process_id": int(read("ProcessId", 0) or 0),
+            "is_enabled": bool(read("IsEnabled", False)),
+            "is_offscreen": bool(read("IsOffscreen", False)),
+            "is_keyboard_focusable": bool(read("IsKeyboardFocusable", False)),
+            "has_keyboard_focus": bool(read("HasKeyboardFocus", False)),
+            "bounding_rectangle": rectangle,
+            "clickable_point": clickable_point,
+            "runtime_id": runtime_id,
+            "patterns": WindowsUIASender._pattern_summary(control),
+            "legacy": legacy,
+        }
+
     def _open_chat_sync(self, receiver: str, is_group: bool) -> bool:
         try:
             for method in self._candidate_methods():
@@ -1543,14 +1637,7 @@ class WindowsUIASender:
                 if input_control
                 else None
             )
-            payload["send_button"] = (
-                {
-                    "name": getattr(button, "Name", ""),
-                    "patterns": self._pattern_summary(button),
-                }
-                if button
-                else None
-            )
+            payload["send_button"] = self._control_diagnostics(button)
         except Exception as exc:
             payload["error_code"] = "uia_diagnose_exception"
             payload["error"] = str(exc)
