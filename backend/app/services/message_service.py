@@ -3,7 +3,7 @@ import logging
 import uuid
 from datetime import datetime
 
-from sqlalchemy import select, func
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import Message
@@ -134,8 +134,12 @@ class MessageService:
             query = query.where(Message.room_id == room_id)
             count_q = count_q.where(Message.room_id == room_id)
         if user_id:
-            query = query.where(Message.sender_wxid == user_id)
-            count_q = count_q.where(Message.sender_wxid == user_id)
+            user_filter = or_(
+                Message.sender_wxid == user_id,
+                Message.target_id == user_id,
+            )
+            query = query.where(user_filter)
+            count_q = count_q.where(user_filter)
         if direction:
             query = query.where(Message.direction == direction)
             count_q = count_q.where(Message.direction == direction)
