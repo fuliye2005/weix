@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Optional
 
 from app.config import get_config
+from app.core.message_identity import normalize_group_message
 from app.core.message_monitor import MessageMonitor
 from app.core.send_result import SendResult
 from app.core.platform import Platform
@@ -431,6 +432,12 @@ class AutoReplyPipeline:
 
     async def _handle_message(self, msg) -> None:
         """消息入口：白名单检查通过后进入防抖缓冲，20s 内同人消息合并处理。"""
+        if getattr(msg, "is_group", False):
+            msg.content, msg.sender = normalize_group_message(
+                msg.content,
+                msg.sender,
+                msg.room_id,
+            )
         logger.info(
             f">>> 收到消息 | sender={msg.sender} | is_group={msg.is_group} | "
             f"is_self={getattr(msg, 'is_self', False)} | "
@@ -927,7 +934,7 @@ class AutoReplyPipeline:
         if getattr(msg, "is_self", False):
             label = "我"
         elif msg.is_group:
-            label = self._name_map.get(msg.sender, msg.sender)
+            label = self._name_map.get(msg.sender, msg.sender) or "未知成员"
         else:
             label = self._name_map.get(msg.sender, "对方")
 
@@ -1009,7 +1016,7 @@ class AutoReplyPipeline:
             )
 
             # 查找显示名
-            sender_name = self._name_map.get(msg.sender, msg.sender)
+            sender_name = self._name_map.get(msg.sender, msg.sender) or "未知成员"
             room_name = ""
             if msg.is_group and msg.room_id:
                 room_name = self._name_map.get(msg.room_id, msg.room_id)

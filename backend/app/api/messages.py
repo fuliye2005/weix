@@ -5,6 +5,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Query
 
 from app.api.auth import verify_token
+from app.core.message_identity import normalize_group_message
 from app.core.platform import Platform
 from app.core.send_result import SendResult
 from app.models.database import Message
@@ -74,6 +75,47 @@ def _schedule_pending_delivery_verification(
     return True
 
 
+def _serialize_message(message: Message) -> MessageOut:
+    """Serialize logs while repairing legacy group rows on read."""
+    content = message.content or ""
+    sender_wxid = message.sender_wxid or ""
+    sender_name = message.sender_name or ""
+
+    if message.direction == "inbound" and message.is_group:
+        content, sender_wxid = normalize_group_message(
+            content,
+            sender_wxid,
+            message.room_id or "",
+        )
+        if sender_name in {message.room_name or "", message.room_id or ""}:
+            sender_name = ""
+
+    return MessageOut(
+        msg_id=message.msg_id,
+        msg_type=message.msg_type,
+        content=content,
+        sender_wxid=sender_wxid,
+        sender_name=sender_name,
+        room_id=message.room_id,
+        room_name=message.room_name or "",
+        is_group=message.is_group,
+        direction=message.direction,
+        status=message.status,
+        reply_to_msg_id=message.reply_to_msg_id,
+        attempt_id=message.attempt_id or "",
+        content_hash=message.content_hash or "",
+        send_method=message.send_method or "",
+        reply_source=message.reply_source or "",
+        error_stage=message.error_stage or "",
+        error_code=message.error_code or "",
+        error_message=message.error_message or "",
+        sent_at=message.sent_at,
+        target_id=message.target_id or "",
+        target_name=message.target_name or "",
+        create_time=message.create_time,
+    )
+
+
 @router.get("", response_model=MessageListResponse)
 async def list_messages(
     room_id: str = Query(""),
@@ -97,33 +139,7 @@ async def list_messages(
         status,
     )
     return MessageListResponse(
-        items=[
-            MessageOut(
-                msg_id=m.msg_id,
-                msg_type=m.msg_type,
-                content=m.content,
-                sender_wxid=m.sender_wxid,
-                sender_name=m.sender_name,
-                room_id=m.room_id,
-                room_name=m.room_name,
-                is_group=m.is_group,
-                direction=m.direction,
-                status=m.status,
-                reply_to_msg_id=m.reply_to_msg_id,
-                attempt_id=m.attempt_id or "",
-                content_hash=m.content_hash or "",
-                send_method=m.send_method or "",
-                reply_source=m.reply_source or "",
-                error_stage=m.error_stage or "",
-                error_code=m.error_code or "",
-                error_message=m.error_message or "",
-                sent_at=m.sent_at,
-                target_id=m.target_id or "",
-                target_name=m.target_name or "",
-                create_time=m.create_time,
-            )
-            for m in items
-        ],
+        items=[_serialize_message(m) for m in items],
         total=total,
         page=page,
         size=size,

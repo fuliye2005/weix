@@ -160,3 +160,44 @@ def test_windows_group_content_prefix_fallback_does_not_use_room_id_as_sender():
     assert sender == "wxid_member"
     assert content == "收到"
     assert reader._clean_group_content("时间: 10:00", "room@chatroom") == "时间: 10:00"
+
+
+def test_windows_v4_group_sender_unresolved_does_not_return_room_id():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE Name2Id (user_name TEXT)")
+
+    reader = WindowsDBReader()
+    reader._sqlite_conn = conn
+    row = conn.execute(
+        "SELECT 99 AS real_sender_id, ? AS source",
+        (b"unrelated protobuf bytes",),
+    ).fetchone()
+
+    assert reader._resolve_v4_group_sender(row, "") == ""
+
+
+def test_legacy_chatroom_reader_includes_contact_display_name():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE ChatRoom ("
+        "ChatRoomName TEXT, UserNameList TEXT, DisplayNameList TEXT, "
+        "ChatRoomOwner TEXT, MemberCount INTEGER)"
+    )
+    conn.execute(
+        "CREATE TABLE Contact (UserName TEXT, NickName TEXT, Remark TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO ChatRoom VALUES (?, ?, ?, ?, ?)",
+        ("room@chatroom", "wxid_member", "成员", "wxid_owner", 1),
+    )
+    conn.execute(
+        "INSERT INTO Contact VALUES (?, ?, ?)",
+        ("room@chatroom", "测试群", ""),
+    )
+
+    reader = WindowsDBReader()
+    reader._sqlite_conn = conn
+
+    assert reader.get_chatrooms()[0]["name"] == "测试群"

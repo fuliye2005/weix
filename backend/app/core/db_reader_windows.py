@@ -22,6 +22,11 @@ from Crypto.Hash import SHA512
 from Crypto.Protocol.KDF import PBKDF2
 
 from app.core.base import BaseDBReader, WeChatMessage
+from app.core.message_identity import (
+    normalize_group_message,
+    parse_group_sender_prefix,
+    strip_group_sender_prefix,
+)
 from app.core.wechat_paths_windows import find_wechat_data_dirs
 
 logger = logging.getLogger(__name__)
@@ -245,9 +250,11 @@ class WindowsDBReader(BaseDBReader):
                         content = str(content)
 
                 if is_group:
-                    sender_from_content = self._parse_group_sender_from_content(content)
-                    sender = sender_from_content or sender
-                    content = self._clean_group_content(content, sender)
+                    content, sender = normalize_group_message(
+                        content,
+                        sender,
+                        room_id,
+                    )
 
                 msg = WeChatMessage(
                     msg_id=str(row["msg_id"] or ""),
@@ -311,8 +318,12 @@ class WindowsDBReader(BaseDBReader):
                     is_group = "@chatroom" in username
                     sender = username
                     if is_group:
-                        sender = self._resolve_v4_group_sender(row, username)
-                        content = self._clean_group_content(content, sender)
+                        sender = self._resolve_v4_group_sender(row, "")
+                        content, sender = normalize_group_message(
+                            content,
+                            sender,
+                            username,
+                        )
 
                     messages.append(
                         WeChatMessage(
@@ -434,12 +445,28 @@ class WindowsDBReader(BaseDBReader):
 
             rooms: list[dict] = []
             for row in cursor:
+                room_id = row["ChatRoomName"] or ""
+                room_name = ""
+                try:
+                    contact_row = self._sqlite_conn.execute(
+                        "SELECT NickName, Remark FROM Contact WHERE UserName = ?",
+                        (room_id,),
+                    ).fetchone()
+                    if contact_row:
+                        room_name = (
+                            contact_row["NickName"]
+                            or contact_row["Remark"]
+                            or ""
+                        )
+                except Exception:
+                    pass
                 room = {
-                    "room_id": row["ChatRoomName"] or "",
+                    "room_id": room_id,
                     "members": (row["UserNameList"] or "").split(";"),
                     "display_names": (row["DisplayNameList"] or "").split(";"),
                     "owner": row["ChatRoomOwner"] or "",
                     "member_count": row["MemberCount"] or 0,
+                    "name": room_name,
                 }
                 rooms.append(room)
 
@@ -1013,35 +1040,12 @@ class WindowsDBReader(BaseDBReader):
     @staticmethod
     def _parse_group_sender_from_content(content: str) -> str:
         """从旧版群消息正文前缀提取发送者 ID。"""
-        text = str(content or "")
-        match = re.match(
-            r"^\s*((?:wxid|gh)_[a-z0-9_-]+|\d+@openim)\s*:\s*(?:\r?\n|$)",
-            text,
-            re.IGNORECASE,
-        )
-        return match.group(1) if match else ""
+        return parse_group_sender_prefix(content)
 
     @classmethod
     def _clean_group_content(cls, content: str, sender: str = "") -> str:
         """移除微信群消息正文中重复的发送者前缀。"""
-        text = str(content or "")
-        candidates = [str(sender or "").strip()]
-        parsed = cls._parse_group_sender_from_content(text)
-        if parsed:
-            candidates.append(parsed)
-
-        for candidate in candidates:
-            if not candidate:
-                continue
-            prefix = re.compile(
-                rf"^\s*{re.escape(candidate)}\s*:\s*(?:\r?\n|$)",
-                re.IGNORECASE,
-            )
-            cleaned, count = prefix.subn("", text, count=1)
-            if count:
-                return cleaned.strip()
-
-        return text.strip()
+        return strip_group_sender_prefix(content, sender)
 
     @staticmethod
     def _derive_mac_key(enc_key: bytes, salt: bytes, hash_name: str = "sha512") -> bytes:
@@ -1400,8 +1404,12 @@ class WindowsDBReader(BaseDBReader):
                     content = self._decode_message_content(row["message_content"])
                     sender = username
                     if is_group:
-                        sender = self._resolve_v4_group_sender(row, username)
-                        content = self._clean_group_content(content, sender)
+                        sender = self._resolve_v4_group_sender(row, "")
+                        content, sender = normalize_group_message(
+                            content,
+                            sender,
+                            username,
+                        )
                     messages.append(
                         WeChatMessage(
                             msg_id=f"{table}:{row['local_id']}",
@@ -1449,8 +1457,12 @@ class WindowsDBReader(BaseDBReader):
                 is_self = self._is_self_sent_v4_row(row)
                 sender = talker
                 if is_group:
-                    sender = self._resolve_v4_group_sender(row, talker)
-                    content = self._clean_group_content(content, sender)
+                    sender = self._resolve_v4_group_sender(row, "")
+                    content, sender = normalize_group_message(
+                        content,
+                        sender,
+                        talker,
+                    )
                 messages.append(
                     WeChatMessage(
                         msg_id=f"{table}:{row['local_id']}",

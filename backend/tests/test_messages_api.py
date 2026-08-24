@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -49,6 +50,29 @@ class FakePendingStructuredSender(FakeStructuredSender):
     async def verify_pending_result(self, result, msg, target_id="", **_kwargs):
         self.verify_calls += 1
         return result.sent("db_verify", db_verified=True, ui_verified=True)
+
+
+def test_message_api_repairs_legacy_group_log_on_read():
+    message = Message(
+        msg_id="legacy:group:1",
+        msg_type=1,
+        content="wxid_member:\n你好",
+        sender_wxid="room@chatroom",
+        sender_name="测试群",
+        room_id="room@chatroom",
+        room_name="测试群",
+        is_group=True,
+        direction="inbound",
+        status="received",
+        create_time=datetime.now(),
+    )
+
+    item = messages_api._serialize_message(message)
+
+    assert item.sender_wxid == "wxid_member"
+    assert item.sender_name == ""
+    assert item.room_name == "测试群"
+    assert item.content == "你好"
 
 
 @pytest.mark.asyncio
