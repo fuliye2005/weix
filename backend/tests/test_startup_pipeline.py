@@ -138,3 +138,77 @@ def test_windows_runtime_rejects_wrong_python_version(monkeypatch):
 
     assert result["ok"] is False
     assert any("Python 3.12" in error for error in result["errors"])
+
+
+def test_startup_refuses_to_guess_when_multiple_wechat_processes_are_unselected(
+    monkeypatch,
+    tmp_path,
+):
+    scanned = []
+
+    class FakeExtractor:
+        def find_wechat_processes(self):
+            return [1111, 2222]
+
+        def selected_account(self):
+            return ""
+
+        def scan_memory_for_keys(self, pid, stop_event=None):
+            scanned.append(pid)
+            return {"message/message_0.db": "00" * 32}
+
+    monkeypatch.setattr(main, "get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "app.core.platform.Platform.get",
+        lambda: SimpleNamespace(key_extractor=FakeExtractor()),
+    )
+
+    main._try_auto_extract_keys()
+
+    assert scanned == []
+
+
+def test_startup_clears_cached_keys_when_they_cannot_bind_to_a_process(
+    monkeypatch,
+    tmp_path,
+):
+    cache = tmp_path / "all_keys.json"
+    cache.write_text('{"message/message_0.db": "' + "00" * 32 + '"}', encoding="utf-8")
+    events = []
+
+    class FakeExtractor:
+        def load_keys(self):
+            return {"message/message_0.db": "00" * 32}
+
+        def validate_cached_keys(self, keys):
+            return keys
+
+        def _has_message_key(self, keys):
+            return bool(keys)
+
+        def bind_process_for_cached_keys(self, pid):
+            events.append(("bind", pid))
+            return False
+
+        def clear_keys(self):
+            events.append(("clear",))
+
+        def find_wechat_processes(self):
+            return [3333]
+
+        def selected_account(self):
+            return "wxid_selected"
+
+        def scan_memory_for_keys(self, pid, stop_event=None):
+            events.append(("scan", pid))
+            return {}
+
+    monkeypatch.setattr(main, "get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "app.core.platform.Platform.get",
+        lambda: SimpleNamespace(key_extractor=FakeExtractor()),
+    )
+
+    main._try_auto_extract_keys()
+
+    assert events == [("bind", 3333), ("clear",), ("scan", 3333), ("clear",)]
