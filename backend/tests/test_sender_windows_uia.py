@@ -77,6 +77,44 @@ class FakeDriver:
         return self.input
 
 
+class FakeDiagnosticSessionList:
+    AutomationId = "session_list"
+    Name = "会话列表"
+
+    def Exists(self, *_args):
+        return False
+
+
+class FakeDiagnosticWindow:
+    NativeWindowHandle = 1234
+    ClassName = "mmui::MainWindow"
+    Name = "微信"
+
+    def ListControl(self, **_kwargs):
+        return FakeDiagnosticSessionList()
+
+
+class FakeDiagnosticDriver:
+    def __init__(self):
+        self._win = FakeDiagnosticWindow()
+
+    def _find_main(self):
+        return self._win
+
+    def _pid_from_hwnd(self, hwnd):
+        assert hwnd == 1234
+        return 5678
+
+    def _search_box(self, _window):
+        return None
+
+    def _chat_input(self, _window):
+        return None
+
+    def current_chat(self):
+        return "测试联系人"
+
+
 @pytest.mark.asyncio
 async def test_uia_sender_writes_text_without_click(monkeypatch):
     sender = WindowsUIASender()
@@ -142,3 +180,19 @@ def test_background_text_write_prefers_legacy_value_pattern():
         allow_focus_fallback=False,
     ) is True
     assert driver.input.value_pattern.value == "只走 Legacy"
+
+
+def test_uia_diagnose_resolves_window_pid_without_sending(monkeypatch):
+    sender = WindowsUIASender()
+    driver = FakeDiagnosticDriver()
+    monkeypatch.setattr(sender, "_get_driver", lambda: driver)
+    monkeypatch.setattr(sender, "_get_bound_pid", lambda: 5678)
+
+    result = sender._diagnose_sync()
+
+    assert result["uia_available"] is True
+    assert result["bound_pid"] == 5678
+    assert result["window"]["hwnd"] == 1234
+    assert result["window"]["pid"] == 5678
+    assert result["current_chat"] == "测试联系人"
+    assert result["error"] == ""

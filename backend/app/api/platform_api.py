@@ -213,6 +213,32 @@ async def restart_backend():
     }
 
 
+@router.get("/uia/diagnose")
+async def diagnose_uia():
+    """Probe UIA controls for the selected Windows account without sending."""
+    platform = Platform.get()
+    if not platform.is_windows:
+        return {
+            "uia_available": False,
+            "error": "当前平台不是 Windows",
+        }
+
+    diagnose = getattr(platform.sender, "diagnose_uia", None)
+    if diagnose is None:
+        return {
+            "uia_available": False,
+            "error": "当前发送器没有 UIA 诊断能力",
+        }
+    try:
+        return await diagnose()
+    except Exception as exc:
+        logger.exception("UIA 诊断失败")
+        return {
+            "uia_available": False,
+            "error": str(exc),
+        }
+
+
 @router.get("/contacts")
 async def list_contacts(
     type: str = Query("all", pattern="^(all|contacts|chatrooms)$"),

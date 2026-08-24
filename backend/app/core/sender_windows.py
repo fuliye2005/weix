@@ -313,6 +313,14 @@ class WindowsSender(BaseMessageSender):
     def last_result(self) -> SendResult | None:
         return self._last_result
 
+    async def diagnose_uia(self) -> dict:
+        """Probe the selected account's UIA tree without sending."""
+        if self._uia_sender is None:
+            from app.core.sender_windows_uia import WindowsUIASender
+
+            self._uia_sender = WindowsUIASender()
+        return await self._uia_sender.diagnose()
+
     async def _send_text_mouse_result(
         self,
         msg: str,

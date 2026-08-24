@@ -58,3 +58,21 @@ def test_contacts_api_uses_isolated_reader(monkeypatch):
     assert ContactReader.opened == [
         ("/wx/db_storage/contact/contact.db", bytes.fromhex("00" * 32))
     ]
+
+
+def test_uia_diagnose_api_delegates_without_sending(monkeypatch):
+    class FakeSender:
+        async def diagnose_uia(self):
+            return {
+                "uia_available": True,
+                "bound_pid": 5678,
+                "window": {"pid": 5678},
+            }
+
+    platform = SimpleNamespace(is_windows=True, sender=FakeSender())
+    monkeypatch.setattr(platform_api.Platform, "get", lambda: platform)
+
+    result = asyncio.run(platform_api.diagnose_uia())
+
+    assert result["uia_available"] is True
+    assert result["window"]["pid"] == 5678

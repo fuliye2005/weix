@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import logging
 import os
 from pathlib import Path
@@ -25,6 +26,48 @@ logger = logging.getLogger(__name__)
 
 _UIA_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wx-uia")
 _PYWIN32_DLL_HANDLES: list[object] = []
+
+
+def _window_pid_from_control(driver: Any, control: Any) -> int | None:
+    """Resolve a UIA control's owning process without activating it."""
+    for attribute in ("ProcessId", "process_id"):
+        try:
+            value = getattr(control, attribute, None)
+            if callable(value):
+                value = value()
+            pid = int(value or 0)
+            if pid > 0:
+                return pid
+        except (TypeError, ValueError, AttributeError):
+            pass
+
+    try:
+        hwnd = int(getattr(control, "NativeWindowHandle", 0) or 0)
+    except (TypeError, ValueError):
+        hwnd = 0
+    if not hwnd:
+        return None
+
+    resolver = getattr(driver, "_pid_from_hwnd", None)
+    if callable(resolver):
+        try:
+            pid = int(resolver(hwnd) or 0)
+            if pid > 0:
+                return pid
+        except (TypeError, ValueError, OSError):
+            pass
+
+    if os.name != "nt":
+        return None
+    try:
+        pid_value = wintypes.DWORD()
+        if not ctypes.windll.user32.GetWindowThreadProcessId(
+            wintypes.HWND(hwnd), ctypes.byref(pid_value)
+        ):
+            return None
+        return int(pid_value.value) or None
+    except (AttributeError, OSError):
+        return None
 
 
 def _prepare_windows_imports() -> None:
@@ -751,6 +794,7 @@ class WindowsUIASender:
             "window": None,
             "uia_available": False,
             "current_chat": "",
+            "session_list": None,
             "search_box": None,
             "chat_input": None,
             "send_button": None,
@@ -778,15 +822,32 @@ class WindowsUIASender:
             driver._win = window
             payload["uia_available"] = True
             payload["driver_pid"] = self._driver_pid
+            hwnd = int(getattr(window, "NativeWindowHandle", 0) or 0)
             payload["window"] = {
-                "hwnd": int(getattr(window, "NativeWindowHandle", 0) or 0),
+                "hwnd": hwnd,
+                "pid": _window_pid_from_control(driver, window),
                 "class_name": str(getattr(window, "ClassName", "") or ""),
                 "name": str(getattr(window, "Name", "") or ""),
             }
+            session_list = None
+            try:
+                session_list = window.ListControl(AutomationId="session_list")
+                if not session_list.Exists(0.2, 0.1):
+                    session_list = None
+            except Exception:
+                session_list = None
             search_box = driver._search_box(window)
             input_control = driver._chat_input(window)
             button = self._find_send_button(driver, input_control) if input_control else None
             payload["current_chat"] = driver.current_chat() or ""
+            payload["session_list"] = (
+                {
+                    "automation_id": getattr(session_list, "AutomationId", ""),
+                    "name": getattr(session_list, "Name", ""),
+                }
+                if session_list
+                else None
+            )
             payload["search_box"] = (
                 {
                     "name": getattr(search_box, "Name", ""),

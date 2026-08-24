@@ -117,6 +117,7 @@ export const getPlatformStatus = () => api.get('/platform/status')
 export const getWechatAccounts = () => api.get('/platform/accounts')
 export const selectWechatAccount = (wxid: string) => api.put('/platform/account', { wxid })
 export const restartBackend = () => api.post('/platform/restart')
+export const diagnoseUia = () => api.get('/platform/uia/diagnose')
 
 // Health
 export const getHealth = () => api.get('/health')
