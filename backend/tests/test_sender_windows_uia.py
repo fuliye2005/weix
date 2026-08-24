@@ -9,6 +9,10 @@ class FakeValuePattern:
     def __init__(self):
         self.value = ""
 
+    @property
+    def Value(self):
+        return self.value
+
     def SetValue(self, value, waitTime=0.1):
         self.value = value
         return True
@@ -76,13 +80,18 @@ class FakeDriver:
 @pytest.mark.asyncio
 async def test_uia_sender_writes_text_without_click(monkeypatch):
     sender = WindowsUIASender()
+    sender._send_mode = "background_uia"
+    sender._background_mode = True
+    sender._send_key_fallback = "enter"
+    sender._require_ui_verify = False
     driver = FakeDriver()
     monkeypatch.setattr(sender, "_get_driver", lambda: driver)
-    def post_enter(_driver):
+    monkeypatch.setattr(sender, "_ensure_driver_window", lambda _method=None: driver)
+    def post_key(_driver, ctrl=False):
         driver.input.value_pattern.value = ""
         return True
 
-    monkeypatch.setattr(sender, "_post_enter_without_focus", post_enter)
+    monkeypatch.setattr(sender, "_post_key_without_focus", post_key)
     monkeypatch.setattr(
         "uiautomation.SendKeys",
         lambda *args, **kwargs: driver.sent.append(args[0]),
@@ -104,10 +113,14 @@ async def test_background_uia_does_not_call_ensure_window(monkeypatch):
 
     driver = Driver()
     monkeypatch.setattr(sender, "_get_driver", lambda: driver)
+    sender._send_mode = "background_uia"
+    sender._background_mode = True
+    sender._send_key_fallback = "enter"
+    sender._require_ui_verify = False
     monkeypatch.setattr(
         sender,
-        "_post_enter_without_focus",
-        lambda _driver: driver.input.value_pattern.__setattr__("value", "") or True,
+        "_post_key_without_focus",
+        lambda _driver, ctrl=False: driver.input.value_pattern.__setattr__("value", "") or True,
     )
 
     assert await sender.send_text("后台发送", "测试联系人") is True

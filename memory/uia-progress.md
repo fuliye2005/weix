@@ -16,7 +16,7 @@
 
 ## 当前结论
 
-UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可以被热激活，项目也已经存在发送按钮查找逻辑。因此当前核心问题不是“是否能启用 UIA”，而是“发送流程还没有真正调用并验证 UIA 发送按钮，且缺少可定位失败阶段的结果记录”。
+UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可以被热激活，项目也已经存在发送按钮查找逻辑。当前发送流程已经接入 UIA 同步执行入口，会真正调用发送按钮的 Pattern，并返回分阶段结果；真实微信窗口和真实联系人仍未做最终验收。
 
 目前尚未向真实联系人发送测试消息，不能把当前状态视为已经完成上线。
 
@@ -31,7 +31,7 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 - [x] 确认当前配置为 `background_mode: false`。
 - [x] 确认当前配置为 `allow_mouse_fallback: false`。
 - [x] 确认 `sender_windows_uia.py` 中已经存在 `_find_send_button()`。
-- [x] 确认当前前台 UIA 路径使用 `SendKeys("{Enter}")`，尚未适配微信的 Ctrl+Enter 发送设置。
+- [x] 确认当前前台 UIA 路径不再默认使用 `SendKeys("{Enter}")`，按键仅作为显式配置的兜底。
 - [x] 确认群聊数据库记录包含 `real_sender_id` 字段。
 - [x] 确认当前群聊解析没有通过 `Name2Id.rowid` 映射真实发送者名称。
 - [x] 确认群聊解析失败时会回退到群 ID，导致发送者名称显示成群聊名称。
@@ -42,6 +42,7 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 - [x] 确认 Python 3.13 环境调用 `_prepare_windows_imports()` 后可以找到 `win32ui`，问题重点在启动环境和导入路径。
 - [x] 完成 UIA 结构化 `SendResult`，可以区分窗口、搜索、正文、调用和 UI 验证阶段。
 - [x] UIA 发送优先查找真实“发送”按钮，并调用 `InvokePattern` / `LegacyIAccessible.DoDefaultAction`。
+- [x] 修复 UIA 结构化发送结果调用了缺失同步入口的问题；现在 `foreground_uia`、`background_uia` 和 `auto` 都会进入统一的 UIA 执行器。
 - [x] 增加输入框写入后的 ValuePattern 回读校验。
 - [x] 增加 UIA 控件诊断方法，返回账号、PID、窗口、搜索框、输入框、发送按钮和 Pattern 信息。
 - [x] 启动脚本改为固定使用 `venv\Scripts\python.exe`，并在启动前检查 UIA 依赖是否来自同一环境。
@@ -53,7 +54,7 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 
 - [x] 让 UIA 发送流程实际调用发送按钮的 `InvokePattern`。
 - [x] 为不支持 `InvokePattern` 的控件增加 `LegacyIAccessible.DoDefaultAction` 兼容路径。
-- [ ] 将 Enter 发送降级为显式配置项，而不是默认发送方式。
+- [x] 将 Enter/Ctrl+Enter 发送降级为显式配置项，而不是默认发送方式。
 - [x] 增加发送前的窗口、会话、输入框和发送按钮校验。
 - [x] 增加发送后的 UI 状态验证，确认输入框已清空或消息气泡已出现。
 - [ ] 增加数据库验证，确认发送成功消息已经写入本地消息记录。
@@ -69,7 +70,7 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 - [ ] 增加管理界面的 UIA 诊断入口和重启按钮。
 - [x] 修改启动脚本，优先使用 `venv\Scripts\python.exe`。
 - [x] 完成 Python 3.12 依赖导入验证，包括 `fastapi`、`win32ui`、`wechatauto` 和 `uiautomation`。
-- [ ] 增加 UIA 控件探测和发送流程单元测试。
+- [x] 增加 UIA 控件探测和发送流程单元测试。
 - [ ] 在用户主动确认后，使用“文件传输助手”完成最小真实发送测试。
 - [ ] 完成真实微信私聊和群聊发送验证。
 
@@ -108,5 +109,6 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 - 已安装 `pytest 9.1.1` 到当前 `venv`。
 - 群聊解析专项测试：通过，`4 passed`。
 - 消息日志迁移测试：通过，`1 passed`，重复执行迁移也通过。
+- Windows 发送器与 UIA 单元测试：通过，`16 passed`。
 - Windows 路径扫描全量测试仍有 2 项旧失败，原因是测试临时目录没有覆盖真实微信目录发现结果；与本次群聊解析改动无关。
-- UIA 真实控件测试：尚未执行，仍不能据此宣称真实发送已完成。
+- UIA 真实控件和数据库回读测试：尚未执行，仍不能据此宣称真实发送已完成。

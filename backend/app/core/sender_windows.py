@@ -20,6 +20,7 @@ import pyautogui
 import pyperclip
 
 from app.core.base import BaseMessageSender
+from app.core.send_result import SendResult
 from app.config import get_config
 from app.utils.paths import get_data_dir
 
@@ -221,6 +222,7 @@ class WindowsSender(BaseMessageSender):
 
         self._last_receiver = ""
         self._last_send_time: float = 0.0
+        self._last_result: SendResult | None = None
 
     # --- 公共接口 ---
 
@@ -244,18 +246,73 @@ class WindowsSender(BaseMessageSender):
         Returns:
             True 表示发送成功。
         """
+        result = await self.send_text_result(
+            msg,
+            receiver,
+            force_skip=force_skip,
+            is_group=is_group,
+            target_id=target_id,
+        )
+        return result.success
+
+    async def send_text_result(
+        self,
+        msg: str,
+        receiver: str,
+        force_skip: bool = False,
+        is_group: bool = False,
+        target_id: str = "",
+    ) -> SendResult:
+        """Send text and retain structured delivery diagnostics."""
+        method = self._method if self._method in {"uia", "uia_only", "uia-first"} else "mouse"
+        result = SendResult.for_message(msg, target_id or receiver, method)
         if not msg or not receiver:
-            logger.error("消息内容或接收者为空")
-            return False
+            result.fail("draft", "invalid_request", "消息内容或接收者为空")
+            self._last_result = result
+            return result
 
         if self._method in {"uia", "uia_only", "uia-first"}:
-            uia_result = await self._send_text_uia(msg, receiver, is_group, target_id)
-            if uia_result or not self._allow_mouse_fallback:
-                return uia_result
+            result = await self._send_text_uia_result(msg, receiver, is_group, target_id)
+            if result.success or not self._allow_mouse_fallback:
+                self._last_result = result
+                return result
             logger.warning("UIA 发送失败，按配置回退鼠标发送 | receiver=%s", receiver)
 
+            result = await self._send_text_mouse_result(
+                msg,
+                receiver,
+                force_skip,
+                is_group,
+                target_id,
+            )
+            self._last_result = result
+            return result
+
+        result = await self._send_text_mouse_result(
+            msg,
+            receiver,
+            force_skip,
+            is_group,
+            target_id,
+        )
+        self._last_result = result
+        return result
+
+    @property
+    def last_result(self) -> SendResult | None:
+        return self._last_result
+
+    async def _send_text_mouse_result(
+        self,
+        msg: str,
+        receiver: str,
+        force_skip: bool,
+        is_group: bool,
+        target_id: str,
+    ) -> SendResult:
+        result = SendResult.for_message(msg, target_id or receiver, "mouse")
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
+        success = await loop.run_in_executor(
             _executor,
             self._send_text_sync,
             msg,
@@ -263,6 +320,19 @@ class WindowsSender(BaseMessageSender):
             force_skip,
             is_group,
             target_id,
+        )
+        if not success:
+            return result.fail(
+                "db_verify" if self._verify_after_send else "invoke",
+                "legacy_send_failed",
+                "传统 Windows 发送流程失败",
+            )
+        result.action_performed = True
+        result.db_verified = bool(self._verify_after_send)
+        return result.sent(
+            "db_verify" if self._verify_after_send else "invoke",
+            action_performed=True,
+            db_verified=result.db_verified,
         )
 
     async def _send_text_uia(
@@ -272,19 +342,29 @@ class WindowsSender(BaseMessageSender):
         is_group: bool,
         target_id: str,
     ) -> bool:
+        result = await self._send_text_uia_result(msg, receiver, is_group, target_id)
+        return result.success
+
+    async def _send_text_uia_result(
+        self,
+        msg: str,
+        receiver: str,
+        is_group: bool,
+        target_id: str,
+    ) -> SendResult:
         if self._uia_sender is None:
             from app.core.sender_windows_uia import WindowsUIASender
 
             self._uia_sender = WindowsUIASender()
         send_started_at = int(time.time()) - 2
-        sent = await self._uia_sender.send_text(
+        result = await self._uia_sender.send_text_result(
             msg,
             receiver,
             is_group=is_group,
             target_id=target_id,
         )
-        if not sent or not self._verify_after_send:
-            return sent
+        if not result.success or not self._verify_after_send:
+            return result
 
         loop = asyncio.get_running_loop()
         verified = await loop.run_in_executor(
@@ -294,13 +374,26 @@ class WindowsSender(BaseMessageSender):
             send_started_at,
             target_id,
         )
+        result.db_verified = verified
+        if verified:
+            return result.sent(
+                "db_verify",
+                db_verified=True,
+                ui_verified=result.ui_verified,
+            )
+
+        result.pending(
+            "db_verify",
+            db_verified=False,
+            ui_verified=result.ui_verified,
+        )
         if not verified:
             logger.error(
                 "UIA 已执行发送，但数据库回读未确认 | receiver=%s | target_id=%s",
                 receiver,
                 target_id,
             )
-        return verified
+        return result
 
     async def send_image(self, path: str, receiver: str) -> bool:
         logger.warning("Windows 平台暂不支持 send_image")

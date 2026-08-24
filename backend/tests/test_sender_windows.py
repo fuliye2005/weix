@@ -55,6 +55,7 @@ def _make_sender():
     sender._type_delay = 0
     sender._skip_search_ttl = 60
     sender._verify_after_send = False
+    sender._method = "mouse"
     return sender
 
 
@@ -140,6 +141,22 @@ async def test_send_text_empty_msg_returns_false():
 
 
 @pytest.mark.asyncio
+async def test_send_text_result_reports_legacy_delivery_stage():
+    sender = _make_sender()
+    sender._method = "mouse"
+    sender._verify_after_send = False
+    sender._send_text_sync = MagicMock(return_value=True)
+
+    result = await sender.send_text_result("你好", "文件传输助手")
+
+    assert result.success is True
+    assert result.status == "sent"
+    assert result.method == "mouse"
+    assert result.stage == "invoke"
+    assert result.action_performed is True
+
+
+@pytest.mark.asyncio
 async def test_send_text_no_wechat_window():
     """微信未运行时应返回 False。"""
     sender = _make_sender()
@@ -201,7 +218,7 @@ def test_global_lock_serialization():
     from app.core.sender_windows import WindowsSender
 
     lock = WindowsSender._gui_lock
-    assert isinstance(lock, threading.Lock)
+    assert isinstance(lock, type(threading.Lock()))
     assert lock.acquire(blocking=False)  # 锁未被持有
     lock.release()
 

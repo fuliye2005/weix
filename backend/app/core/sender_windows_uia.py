@@ -819,3 +819,38 @@ class WindowsUIASender:
         target_id: str,
     ) -> bool:
         return self._send_text_sync_result(msg, receiver, is_group, target_id).success
+
+    def _send_text_sync_result(
+        self,
+        msg: str,
+        receiver: str,
+        is_group: bool,
+        target_id: str,
+    ) -> SendResult:
+        """Run the configured UIA mode(s) serially inside the UIA executor."""
+        last_result: SendResult | None = None
+        for method in self._candidate_methods():
+            result = self._send_text_once(
+                msg,
+                receiver,
+                is_group,
+                target_id,
+                method,
+            )
+            if result.success:
+                return result
+            last_result = result
+            if self._send_mode != "auto":
+                break
+            logger.warning(
+                "UIA 模式发送失败，尝试下一模式 | method=%s | stage=%s | code=%s",
+                method,
+                result.stage,
+                result.error_code,
+            )
+
+        return last_result or SendResult.for_message(
+            msg,
+            target_id or receiver,
+            self._send_mode,
+        ).fail("window", "uia_not_attempted", "没有可用的 UIA 发送模式")
