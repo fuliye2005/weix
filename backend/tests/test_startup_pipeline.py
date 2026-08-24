@@ -82,3 +82,59 @@ async def test_pipeline_start_is_single_flight(monkeypatch):
     assert result1 is pipeline
     assert result2 is pipeline
     assert calls == 1
+
+
+def test_windows_runtime_check_reports_pinned_environment(monkeypatch):
+    from app.core import windows_runtime
+
+    monkeypatch.setattr(windows_runtime.sys, "platform", "win32")
+    monkeypatch.setattr(windows_runtime.sys, "version_info", (3, 12, 13))
+    monkeypatch.setattr(windows_runtime, "_site_package_paths", lambda: [])
+    monkeypatch.setattr(
+        windows_runtime.importlib.metadata,
+        "version",
+        lambda package: windows_runtime.EXPECTED_PACKAGES[package],
+    )
+    monkeypatch.setattr(
+        windows_runtime,
+        "_module_path",
+        lambda module: str(
+            windows_runtime.Path(windows_runtime.sys.prefix)
+            / "Lib"
+            / "site-packages"
+            / f"{module}.py"
+        ),
+    )
+
+    result = windows_runtime.inspect_windows_runtime()
+
+    assert result["ok"] is True
+    assert result["packages"]["wechatauto-replica"] == "1.1.7"
+
+
+def test_windows_runtime_rejects_wrong_python_version(monkeypatch):
+    from app.core import windows_runtime
+
+    monkeypatch.setattr(windows_runtime.sys, "platform", "win32")
+    monkeypatch.setattr(windows_runtime.sys, "version_info", (3, 13, 0))
+    monkeypatch.setattr(windows_runtime, "_site_package_paths", lambda: [])
+    monkeypatch.setattr(
+        windows_runtime.importlib.metadata,
+        "version",
+        lambda package: windows_runtime.EXPECTED_PACKAGES[package],
+    )
+    monkeypatch.setattr(
+        windows_runtime,
+        "_module_path",
+        lambda module: str(
+            windows_runtime.Path(windows_runtime.sys.prefix)
+            / "Lib"
+            / "site-packages"
+            / f"{module}.py"
+        ),
+    )
+
+    result = windows_runtime.inspect_windows_runtime()
+
+    assert result["ok"] is False
+    assert any("Python 3.12" in error for error in result["errors"])

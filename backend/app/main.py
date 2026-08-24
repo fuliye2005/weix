@@ -258,6 +258,10 @@ async def lifespan(app: FastAPI):
     _pipeline_start_lock = asyncio.Lock()
     _pipeline = None
     setup_logging()
+    if sys.platform == "win32":
+        from app.core.windows_runtime import assert_windows_runtime
+
+        assert_windows_runtime()
     get_config()
     await init_database()
     _start_auto_extract_keys_background()
