@@ -201,7 +201,12 @@ def test_background_text_write_prefers_legacy_value_pattern():
 def test_uia_diagnose_resolves_window_pid_without_sending(monkeypatch):
     sender = WindowsUIASender()
     driver = FakeDiagnosticDriver()
-    monkeypatch.setattr(sender, "_get_driver", lambda: driver)
+    probe_methods = []
+    monkeypatch.setattr(
+        sender,
+        "_ensure_driver_window",
+        lambda method=None: probe_methods.append(method) or driver,
+    )
     monkeypatch.setattr(
         sender,
         "_binding_info",
@@ -222,7 +227,31 @@ def test_uia_diagnose_resolves_window_pid_without_sending(monkeypatch):
     assert result["window"]["hwnd"] == 1234
     assert result["window"]["pid"] == 5678
     assert result["current_chat"] == "测试联系人"
+    assert result["probe_method"] == "foreground_uia"
+    assert probe_methods == ["foreground_uia"]
     assert result["error"] == ""
+
+
+def test_uia_diagnose_reports_window_initialization_error(monkeypatch):
+    sender = WindowsUIASender()
+    monkeypatch.setattr(sender, "_ensure_driver_window", lambda _method=None: None)
+    monkeypatch.setattr(
+        sender,
+        "_binding_info",
+        lambda: {
+            "selected_account": "wxid_selected_1",
+            "bound_account": "wxid_selected_1",
+            "bound_pid": 5678,
+            "status": "bound",
+            "error_code": "",
+            "error_message": "",
+        },
+    )
+
+    result = sender._diagnose_sync()
+
+    assert result["uia_available"] is False
+    assert result["error_code"] == "uia_window_unavailable"
 
 
 def test_uia_binding_refuses_to_guess_when_pid_is_unknown(monkeypatch):

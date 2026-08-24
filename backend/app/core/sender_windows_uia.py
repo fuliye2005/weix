@@ -1028,8 +1028,10 @@ class WindowsUIASender:
     def _diagnose_sync(self) -> dict[str, Any]:
         binding = self._binding_info()
         target_pid = binding.get("bound_pid")
+        probe_method = self._diagnostic_method()
         payload: dict[str, Any] = {
             "method": self._send_mode,
+            "probe_method": probe_method,
             "selected_account": binding.get("selected_account", ""),
             "bound_account": binding.get("bound_account", ""),
             "binding_status": binding.get("status", ""),
@@ -1049,10 +1051,17 @@ class WindowsUIASender:
             payload["error"] = binding.get("error_message", "账号绑定不可用")
             return payload
         try:
-            driver = self._get_driver()
-            window = driver._find_main()
-            if window is None:
-                window = driver._win
+            driver = self._ensure_driver_window(probe_method)
+            if driver is None:
+                binding_error = self._last_binding_error or {}
+                payload["error_code"] = binding_error.get(
+                    "error_code", "uia_window_unavailable"
+                )
+                payload["error"] = binding_error.get(
+                    "error_message", "未找到可访问的绑定账号 UIA 主窗口"
+                )
+                return payload
+            window = getattr(driver, "_win", None)
             if window is None:
                 payload["error"] = "未找到可访问的 mmui::MainWindow"
                 return payload
@@ -1121,8 +1130,18 @@ class WindowsUIASender:
                 else None
             )
         except Exception as exc:
+            payload["error_code"] = "uia_diagnose_exception"
             payload["error"] = str(exc)
         return payload
+
+    def _diagnostic_method(self) -> str:
+        """Choose a read-only UIA probe mode without sending or mouse fallback."""
+        if self._send_mode == "auto":
+            capability = self._probe_background_capability()
+            if capability.get("available"):
+                return "background_uia"
+            return "foreground_uia"
+        return self._send_mode
 
     def _send_text_sync(
         self,
