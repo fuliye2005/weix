@@ -154,11 +154,20 @@ async def test_uia_sender_writes_text_without_click(monkeypatch):
     driver = FakeDriver()
     monkeypatch.setattr(sender, "_get_driver", lambda: driver)
     monkeypatch.setattr(sender, "_ensure_driver_window", lambda _method=None: driver)
-    def post_key(_driver, ctrl=False):
-        driver.input.value_pattern.value = ""
-        return True
-
-    monkeypatch.setattr(sender, "_post_key_without_focus", post_key)
+    monkeypatch.setattr(sender, "_find_send_button", lambda *_args: FakeSendButton())
+    monkeypatch.setattr(
+        sender,
+        "_invoke_control",
+        lambda _control: driver.input.value_pattern.__setattr__("value", "")
+        or (True, "InvokePattern"),
+    )
+    monkeypatch.setattr(
+        sender,
+        "_post_key_without_focus",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("background UIA must not inject keyboard input")
+        ),
+    )
     monkeypatch.setattr(
         "uiautomation.SendKeys",
         lambda *args, **kwargs: driver.sent.append(args[0]),
@@ -199,8 +208,14 @@ async def test_background_uia_does_not_call_ensure_window(monkeypatch):
     monkeypatch.setattr(sender, "_window_matches_bound_pid", lambda *_args: True)
     monkeypatch.setattr(
         sender,
-        "_post_key_without_focus",
-        lambda _driver, ctrl=False: driver.input.value_pattern.__setattr__("value", "") or True,
+        "_find_send_button",
+        lambda *_args: FakeSendButton(),
+    )
+    monkeypatch.setattr(
+        sender,
+        "_invoke_control",
+        lambda _control: driver.input.value_pattern.__setattr__("value", "")
+        or (True, "InvokePattern"),
     )
 
     assert await sender.send_text("后台发送", "测试联系人") is True
@@ -370,6 +385,7 @@ def test_uia_binding_rejects_account_mismatch(monkeypatch):
 def test_auto_selects_foreground_when_background_probe_is_incomplete(monkeypatch):
     sender = WindowsUIASender()
     sender._send_mode = "auto"
+    sender._allow_foreground_activation = True
     monkeypatch.setattr(
         sender,
         "_probe_background_capability",
@@ -381,6 +397,19 @@ def test_auto_selects_foreground_when_background_probe_is_incomplete(monkeypatch
     )
 
     assert sender._candidate_methods() == ["foreground_uia"]
+
+
+def test_auto_stops_when_background_probe_is_incomplete_and_foreground_is_disabled(monkeypatch):
+    sender = WindowsUIASender()
+    sender._send_mode = "auto"
+    sender._allow_foreground_activation = False
+    monkeypatch.setattr(
+        sender,
+        "_probe_background_capability",
+        lambda: {"available": False, "reason_code": "incomplete", "reason": "test"},
+    )
+
+    assert sender._candidate_methods() == []
 
 
 def test_auto_does_not_retry_after_send_action(monkeypatch):

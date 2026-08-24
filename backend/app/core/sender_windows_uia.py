@@ -141,6 +141,9 @@ class WindowsUIASender:
             )
         self._send_mode = configured_mode
         self._background_mode = configured_mode == "background_uia"
+        self._allow_foreground_activation = bool(
+            win_cfg.get("allow_foreground_activation", False)
+        )
         self._send_key_fallback = str(
             win_cfg.get("send_key_fallback", "none") or "none"
         ).strip().lower()
@@ -979,14 +982,84 @@ class WindowsUIASender:
         if self._send_mode == "auto":
             capability = self._probe_background_capability()
             if capability.get("available"):
-                return ["background_uia", "foreground_uia"]
+                return ["background_uia"]
+            if self._allow_foreground_activation:
+                logger.info(
+                    "后台 UIA 能力不足，按显式配置选择前台 UIA | code=%s | reason=%s",
+                    capability.get("reason_code", ""),
+                    capability.get("reason", ""),
+                )
+                return ["foreground_uia"]
             logger.info(
-                "后台 UIA 能力不足，自动选择前台 UIA | code=%s | reason=%s",
+                "后台 UIA 能力不足且禁止前台激活，停止发送 | code=%s | reason=%s",
                 capability.get("reason_code", ""),
                 capability.get("reason", ""),
             )
-            return ["foreground_uia"]
+            return []
         return [self._send_mode]
+
+    @staticmethod
+    def _foreground_input_state() -> dict[str, int]:
+        """Read foreground/focus/cursor state without changing Windows input state."""
+        state = {"foreground_hwnd": 0, "focus_hwnd": 0, "cursor_x": 0, "cursor_y": 0}
+        if os.name != "nt":
+            return state
+        try:
+            user32 = ctypes.windll.user32
+            state["foreground_hwnd"] = int(user32.GetForegroundWindow() or 0)
+            point = wintypes.POINT()
+            if user32.GetCursorPos(ctypes.byref(point)):
+                state["cursor_x"] = int(point.x)
+                state["cursor_y"] = int(point.y)
+            foreground_thread = user32.GetWindowThreadProcessId(
+                wintypes.HWND(state["foreground_hwnd"]), None
+            )
+            if foreground_thread:
+                class GuiThreadInfo(ctypes.Structure):
+                    _fields_ = [
+                        ("cbSize", wintypes.DWORD),
+                        ("flags", wintypes.DWORD),
+                        ("hwndActive", wintypes.HWND),
+                        ("hwndFocus", wintypes.HWND),
+                        ("hwndCapture", wintypes.HWND),
+                        ("hwndMenuOwner", wintypes.HWND),
+                        ("hwndMoveSize", wintypes.HWND),
+                        ("hwndCaret", wintypes.HWND),
+                    ]
+
+                info = GuiThreadInfo()
+                info.cbSize = ctypes.sizeof(info)
+                if user32.GetGUIThreadInfo(foreground_thread, ctypes.byref(info)):
+                    state["focus_hwnd"] = int(info.hwndFocus or 0)
+        except (AttributeError, OSError, TypeError):
+            pass
+        return state
+
+    def _verify_background_state(
+        self,
+        result: SendResult,
+        before: dict[str, int],
+        phase: str,
+    ) -> bool:
+        """Fail closed if a background UIA call changes global input state."""
+        after = self._foreground_input_state()
+        unchanged = before == after
+        result.details.setdefault("background_guard", {})[phase] = {
+            "before": before,
+            "after": after,
+            "unchanged": unchanged,
+        }
+        if unchanged:
+            return True
+        result.fail(
+            "invoke" if phase == "after_invoke" else "window",
+            "background_input_state_changed",
+            "后台 UIA 操作改变了前台窗口、键盘焦点或鼠标位置，已停止发送",
+            background_phase=phase,
+            background_before=before,
+            background_after=after,
+        )
+        return False
 
     def _post_key_without_focus(self, driver: Any, ctrl: bool = False) -> bool:
         """Post an explicitly configured Enter/Ctrl+Enter sequence."""
@@ -1032,6 +1105,7 @@ class WindowsUIASender:
     ) -> SendResult:
         result = SendResult.for_message(msg, target_id or receiver, method, attempt_id)
         background = method == "background_uia"
+        background_state = self._foreground_input_state() if background else None
         try:
             driver = self._ensure_driver_window(method)
             if driver is None:
@@ -1042,6 +1116,10 @@ class WindowsUIASender:
                     binding_error.get("error_message", "未找到绑定账号的 UIA 主窗口"),
                     binding=binding_error,
                 )
+            if background and not self._verify_background_state(
+                result, background_state or {}, "after_window"
+            ):
+                return result
 
             current_name = driver.current_chat()
             input_control = driver._chat_input()
@@ -1073,6 +1151,11 @@ class WindowsUIASender:
                     )
                 input_control = driver._chat_input()
 
+            if background and not self._verify_background_state(
+                result, background_state or {}, "after_navigation"
+            ):
+                return result
+
             if input_control is None:
                 return result.fail("draft", "input_not_found", "未找到聊天输入框")
             if not self._set_text_without_mouse(
@@ -1102,6 +1185,11 @@ class WindowsUIASender:
                         written=written,
                         retry_attempted=not background,
                     )
+
+            if background and not self._verify_background_state(
+                result, background_state or {}, "after_draft"
+            ):
+                return result
 
             if not background:
                 try:
@@ -1144,15 +1232,11 @@ class WindowsUIASender:
                         "未找到真实发送按钮，且未启用按键兜底",
                     )
                 if background:
-                    if not self._post_key_without_focus(
-                        driver,
-                        ctrl=self._send_key_fallback == "ctrl_enter",
-                    ):
-                        return result.fail(
-                            "invoke",
-                            "send_key_fallback_failed",
-                            "后台 UIA 按键兜底投递失败",
-                        )
+                    return result.fail(
+                        "invoke",
+                        "background_send_button_required",
+                        "后台 UIA 禁止键盘投递，必须找到真实发送按钮",
+                    )
                 else:
                     if not input_control.SetFocus():
                         return result.fail("invoke", "input_focus_failed", "无法聚焦聊天输入框")
@@ -1164,6 +1248,10 @@ class WindowsUIASender:
                 invoke_method = f"key:{self._send_key_fallback}"
 
             result.details["invoke_method"] = invoke_method
+            if background and not self._verify_background_state(
+                result, background_state or {}, "after_invoke"
+            ):
+                return result
             if not self._wait_input_empty(input_control):
                 return result.fail(
                     "ui_verify",
