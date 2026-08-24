@@ -44,7 +44,15 @@ def _site_package_paths() -> list[Path]:
     candidates.extend(path for path in sys.path if path and "site-packages" in path.lower())
     for raw in candidates:
         path = Path(raw).resolve()
-        if path.is_dir() and path not in paths:
+        # ``site.getsitepackages()`` may include the venv root on Windows.
+        # PyWin32 also adds ``win32``, ``win32/lib`` and ``pythonwin`` to
+        # ``sys.path``; these are subdirectories of the same package root,
+        # not independent package installations.
+        if (
+            path.is_dir()
+            and path.name.lower() in {"site-packages", "dist-packages"}
+            and path not in paths
+        ):
             paths.append(path)
     return paths
 
