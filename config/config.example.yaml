@@ -72,6 +72,8 @@ windows_sender:
   allow_mouse_fallback: false
   # 只有显式设置 enter/ctrl_enter 才允许按键兜底，默认只调用真实发送按钮 Pattern
   send_key_fallback: none
+  # 后台模式使用 UIA 找到发送按钮，再投递窗口消息；不移动鼠标、不抢键盘、不前置窗口
+  background_post_message: true
   require_ui_verify: true
   input_verify_timeout: 3.0
   ui_verify_timeout: 4.0

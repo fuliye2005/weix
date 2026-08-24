@@ -149,6 +149,7 @@ async def test_uia_sender_writes_text_without_click(monkeypatch):
     sender = WindowsUIASender()
     sender._send_mode = "background_uia"
     sender._background_mode = True
+    sender._background_post_message = False
     sender._send_key_fallback = "enter"
     sender._require_ui_verify = False
     driver = FakeDriver()
@@ -180,6 +181,38 @@ async def test_uia_sender_writes_text_without_click(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_background_uia_uses_posted_button_message_without_input_injection(monkeypatch):
+    sender = WindowsUIASender()
+    sender._send_mode = "background_uia"
+    sender._background_mode = True
+    sender._background_post_message = True
+    sender._require_ui_verify = False
+    driver = FakeDriver()
+    monkeypatch.setattr(sender, "_get_driver", lambda: driver)
+    monkeypatch.setattr(sender, "_ensure_driver_window", lambda _method=None: driver)
+    monkeypatch.setattr(sender, "_find_send_button", lambda *_args: FakeSendButton())
+
+    def post_button(_driver, _button):
+        driver.input.value_pattern.value = ""
+        return True, "PostMessage:WM_LBUTTON"
+
+    monkeypatch.setattr(sender, "_post_button_message_without_mouse", post_button)
+    monkeypatch.setattr(
+        "uiautomation.SendKeys",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("background post-message path must not inject keys")
+        ),
+    )
+
+    result = await sender.send_text_result("后台发送", "测试联系人")
+
+    assert result.success is True
+    assert result.method == "background_uia"
+    assert result.details["invoke_method"] == "PostMessage:WM_LBUTTON"
+    assert driver.input.focused is False
+
+
+@pytest.mark.asyncio
 async def test_background_uia_does_not_call_ensure_window(monkeypatch):
     sender = WindowsUIASender()
 
@@ -191,6 +224,7 @@ async def test_background_uia_does_not_call_ensure_window(monkeypatch):
     monkeypatch.setattr(sender, "_get_driver", lambda: driver)
     sender._send_mode = "background_uia"
     sender._background_mode = True
+    sender._background_post_message = False
     sender._send_key_fallback = "enter"
     sender._require_ui_verify = False
     monkeypatch.setattr(

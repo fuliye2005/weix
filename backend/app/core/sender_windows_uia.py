@@ -152,6 +152,9 @@ class WindowsUIASender:
         self._input_verify_timeout = float(win_cfg.get("input_verify_timeout", 3.0))
         self._ui_verify_timeout = float(win_cfg.get("ui_verify_timeout", 4.0))
         self._require_ui_verify = bool(win_cfg.get("require_ui_verify", True))
+        self._background_post_message = bool(
+            win_cfg.get("background_post_message", True)
+        )
         self._ensure_full_layout = bool(win_cfg.get("ensure_full_layout", True))
         self._last_result: SendResult | None = None
         self._driver_account = ""
@@ -860,6 +863,70 @@ class WindowsUIASender:
         return False, ""
 
     @staticmethod
+    def _post_button_message_without_mouse(
+        driver: Any,
+        control: Any,
+    ) -> tuple[bool, str]:
+        """Ask the UIA-discovered button to handle a click without input injection.
+
+        Weixin's custom ``mmui::XOutlineButton`` exposes a usable UIA
+        bounding rectangle but its UIA invoke action either does nothing or
+        activates the window on the tested 4.1.12.26 build. Posting the
+        button's mouse messages to the already materialized main window keeps
+        the physical cursor, keyboard focus, and foreground window untouched.
+        """
+        if os.name != "nt":
+            return False, ""
+        try:
+            hwnd = int(getattr(driver._win, "NativeWindowHandle", 0) or 0)
+            bounds = getattr(control, "BoundingRectangle", None)
+            if not hwnd or bounds is None:
+                return False, ""
+
+            point = wintypes.POINT(
+                int((float(bounds.left) + float(bounds.right)) / 2),
+                int((float(bounds.top) + float(bounds.bottom)) / 2),
+            )
+            user32 = ctypes.windll.user32
+            user32.ScreenToClient.argtypes = [
+                wintypes.HWND,
+                ctypes.POINTER(wintypes.POINT),
+            ]
+            user32.ScreenToClient.restype = wintypes.BOOL
+            if not user32.ScreenToClient(wintypes.HWND(hwnd), ctypes.byref(point)):
+                return False, ""
+            if not (0 <= point.x <= 0x7FFF and 0 <= point.y <= 0x7FFF):
+                return False, ""
+
+            user32.PostMessageW.argtypes = [
+                wintypes.HWND,
+                wintypes.UINT,
+                wintypes.WPARAM,
+                wintypes.LPARAM,
+            ]
+            user32.PostMessageW.restype = wintypes.BOOL
+            lparam = (int(point.y) << 16) | (int(point.x) & 0xFFFF)
+            if not user32.PostMessageW(
+                wintypes.HWND(hwnd),
+                0x0201,  # WM_LBUTTONDOWN
+                0x0001,  # MK_LBUTTON
+                lparam,
+            ):
+                return False, ""
+            time.sleep(0.03)
+            if not user32.PostMessageW(
+                wintypes.HWND(hwnd),
+                0x0202,  # WM_LBUTTONUP
+                0,
+                lparam,
+            ):
+                return False, ""
+            return True, "PostMessage:WM_LBUTTON"
+        except (AttributeError, OSError, TypeError, ValueError) as exc:
+            logger.debug("后台发送按钮消息投递失败: %s", exc)
+            return False, ""
+
+    @staticmethod
     def _post_enter_without_focus(driver: Any) -> bool:
         """Post an Enter key sequence to the WeChat window without activating it."""
         try:
@@ -1234,17 +1301,27 @@ class WindowsUIASender:
             button = self._find_send_button(driver, input_control)
             invoke_method = ""
             if button is not None:
-                invoke = (
-                    self._invoke_background_control
-                    if background
-                    else self._invoke_control
-                )
-                invoked, invoke_method = invoke(button)
+                if background and self._background_post_message:
+                    invoked, invoke_method = self._post_button_message_without_mouse(
+                        driver,
+                        button,
+                    )
+                else:
+                    invoke = (
+                        self._invoke_background_control
+                        if background
+                        else self._invoke_control
+                    )
+                    invoked, invoke_method = invoke(button)
                 if not invoked:
                     return result.fail(
                         "invoke",
-                        "send_button_invoke_failed",
-                        "发送按钮存在但 Invoke/Legacy Pattern 调用失败",
+                        "background_button_message_failed"
+                        if background and self._background_post_message
+                        else "send_button_invoke_failed",
+                        "后台发送按钮消息投递失败"
+                        if background and self._background_post_message
+                        else "发送按钮存在但 Invoke/Legacy Pattern 调用失败",
                         patterns=self._pattern_summary(button),
                     )
                 result.action_performed = True
