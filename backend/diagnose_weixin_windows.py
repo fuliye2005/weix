@@ -134,8 +134,9 @@ def _run_diagnosis() -> int:
         (
             info
             for info in db_infos
-            if str(info["rel_path"]).replace("\\", "/").lower()
-            == "message/message_0.db"
+            if str(info["rel_path"]).replace("\\", "/").lower().endswith(
+                "/message/message_0.db"
+            )
         ),
         None,
     )
@@ -151,7 +152,16 @@ def _run_diagnosis() -> int:
     print("scan_key_count:", len(keys))
     print("scan_key_paths:", sorted(keys))
 
-    result_key = keys.get("message/message_0.db")
+    result_key = next(
+        (
+            value
+            for path, value in keys.items()
+            if str(path).replace("\\", "/").lower().endswith(
+                "/message/message_0.db"
+            )
+        ),
+        None,
+    )
     if not result_key:
         print("scan_message_key: False")
         print("result: no_message_key")
