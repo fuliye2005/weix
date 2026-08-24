@@ -18,6 +18,8 @@
 
 UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可以被热激活，项目也已经存在发送按钮查找逻辑。当前发送流程已经接入 UIA 同步执行入口，会真正调用发送按钮的 Pattern，并返回分阶段结果；真实微信窗口和真实联系人仍未做最终验收。
 
+管理界面现在可以执行只读 UIA 检测，返回选中账号、绑定 PID、窗口句柄、当前会话、搜索框、聊天输入框和发送按钮的 Pattern 信息。检测不会发送消息，也不会主动移动鼠标。
+
 目前尚未向真实联系人发送测试消息，不能把当前状态视为已经完成上线。
 
 ## 已完成
@@ -45,6 +47,9 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 - [x] 修复 UIA 结构化发送结果调用了缺失同步入口的问题；现在 `foreground_uia`、`background_uia` 和 `auto` 都会进入统一的 UIA 执行器。
 - [x] 增加输入框写入后的 ValuePattern 回读校验。
 - [x] 增加 UIA 控件诊断方法，返回账号、PID、窗口、搜索框、输入框、发送按钮和 Pattern 信息。
+- [x] 增加 `GET /api/platform/uia/diagnose` 诊断接口，并在聊天配置页增加“UIA 检测”按钮和结果弹窗。
+- [x] 修复 UIA 诊断窗口 PID 获取：优先使用 UIA 驱动能力，必要时使用 Win32 `GetWindowThreadProcessId`，避免调用不存在的发送器方法。
+- [x] 管理界面提供后端重启按钮，账号切换后可以重新绑定数据库、监听器和微信窗口。
 - [x] 启动脚本改为固定使用 `venv\Scripts\python.exe`，并在启动前检查 UIA 依赖是否来自同一环境。
 - [x] 从外部 Python 3.13 的 `_pth` 中移除 `venv-py313-stale` 路径。
 
@@ -52,27 +57,12 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 
 以下项目仍未完成或尚未得到真实运行验证：
 
-- [x] 让 UIA 发送流程实际调用发送按钮的 `InvokePattern`。
-- [x] 为不支持 `InvokePattern` 的控件增加 `LegacyIAccessible.DoDefaultAction` 兼容路径。
-- [x] 将 Enter/Ctrl+Enter 发送降级为显式配置项，而不是默认发送方式。
-- [x] 增加发送前的窗口、会话、输入框和发送按钮校验。
-- [x] 增加发送后的 UI 状态验证，确认输入框已清空或消息气泡已出现。
 - [ ] 增加数据库验证，确认发送成功消息已经写入本地消息记录。
-- [x] 增加结构化 `SendResult`，区分窗口、搜索、输入框、按钮调用、UI 验证和数据库验证阶段。
-- [x] 修复群聊 `real_sender_id -> Name2Id.rowid -> user_name` 的发送者解析。
-- [x] 统一群聊入站和出站正文清理，移除正文中的 `wxid_xxx:` 前缀。
-- [x] 为 `messages` 表增加消息方向、发送状态、失败原因、发送时间和回复关联字段。
-- [x] 编写数据库迁移脚本，兼容已经存在的 SQLite 数据库。
-- [x] 在消息 API 中返回消息方向、发送状态、失败原因、错误阶段、尝试 ID 和发送者信息。
-- [x] 在 `MessageLog.vue` 中增加发送/接收方向、状态、发送方式、回复来源和错误阶段展示。
-- [x] 增加回复消息日志，确保规则/AI 生成的回复和实际发送结果分别可追踪。
 - [ ] 增加多账号绑定、账号选择和账号在线状态的完整验证。
-- [ ] 增加管理界面的 UIA 诊断入口和重启按钮。
-- [x] 修改启动脚本，优先使用 `venv\Scripts\python.exe`。
-- [x] 完成 Python 3.12 依赖导入验证，包括 `fastapi`、`win32ui`、`wechatauto` 和 `uiautomation`。
-- [x] 增加 UIA 控件探测和发送流程单元测试。
 - [ ] 在用户主动确认后，使用“文件传输助手”完成最小真实发送测试。
 - [ ] 完成真实微信私聊和群聊发送验证。
+- [ ] 验证多开微信时，UIA 诊断和发送器始终绑定到所选账号的 PID，不误操作其他账号。
+- [ ] 验证发送失败、窗口关闭、会话切换和微信升级后的错误阶段与恢复行为。
 
 ## 技术实施顺序
 
@@ -113,5 +103,13 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 - 自动回复出站日志集成测试：通过，`8 passed`，验证 `generated -> sending -> sent`、`attempt_id` 和 `reply_to_msg_id`。
 - 消息 API/手动发送日志测试：通过，`11 passed`。
 - 前端 `npm run build`：通过；Vite 仅报告已有的大 chunk 警告。
+- UIA 诊断、PID 解析和平台接口定向测试：通过，`6 passed`。
+- UIA 检测界面前端构建：通过；Vite 仅报告已有的大 chunk 警告。
 - Windows 路径扫描全量测试仍有 2 项旧失败，原因是测试临时目录没有覆盖真实微信目录发现结果；与本次群聊解析改动无关。
 - UIA 真实控件和数据库回读测试：尚未执行，仍不能据此宣称真实发送已完成。
+
+## 最近提交
+
+- `0b5380a feat: add UIA diagnostics to chat config`
+- `a1fa893 feat: add UIA diagnostics endpoint`
+- `1db76cd feat: expose message delivery logs`
