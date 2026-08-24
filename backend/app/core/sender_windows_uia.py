@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+from pathlib import Path
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -20,12 +23,41 @@ from app.config import get_config
 logger = logging.getLogger(__name__)
 
 _UIA_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wx-uia")
+_PYWIN32_DLL_HANDLES: list[object] = []
+
+
+def _prepare_windows_imports() -> None:
+    """Make pywin32 importable from the bundled/embedded Python runtime."""
+    if os.name != "nt":
+        return
+
+    site_dirs: list[Path] = []
+    for raw_path in tuple(sys.path):
+        if raw_path:
+            candidate = Path(raw_path)
+            if candidate.name.casefold() == "site-packages":
+                site_dirs.append(candidate)
+
+    for site_dir in site_dirs:
+        dll_dir = site_dir / "pywin32_system32"
+        if dll_dir.is_dir():
+            try:
+                handle = os.add_dll_directory(str(dll_dir))
+                _PYWIN32_DLL_HANDLES.append(handle)
+            except (AttributeError, OSError):
+                pass
+
+        for relative in ("win32", "win32/lib", "pythonwin"):
+            module_dir = site_dir / relative
+            if module_dir.is_dir() and str(module_dir) not in sys.path:
+                sys.path.insert(0, str(module_dir))
 
 
 class _SelectedWeChatUIA:
     """Bind the third-party UIA driver to the account-selected Weixin process."""
 
     def __init__(self, target_pid: int | None):
+        _prepare_windows_imports()
         try:
             from wechatauto.uia_driver import WeChatUIA
         except ImportError as exc:  # pragma: no cover - dependency install issue
@@ -51,6 +83,7 @@ class WindowsUIASender:
     """Send Windows WeChat text without pyautogui or physical mouse movement."""
 
     def __init__(self):
+        _prepare_windows_imports()
         self._driver: Any = None
         self._driver_pid: int | None = None
         self._driver_lock = threading.Lock()
@@ -109,6 +142,7 @@ class WindowsUIASender:
             return self._driver
 
     def _is_running_sync(self) -> bool:
+        _prepare_windows_imports()
         try:
             from wechatauto.uia_driver import WeChatUIA
 

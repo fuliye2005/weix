@@ -62,6 +62,7 @@ macos_sender:
   window_activate_delay: 0.5
 
 windows_sender:
+  method: uia
   # uia 后台发送：不激活微信、不聚焦控件、不发送键盘事件
   background_mode: true
   allow_mouse_fallback: false
