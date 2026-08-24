@@ -149,6 +149,7 @@ class WindowsUIASender:
         self._input_verify_timeout = float(win_cfg.get("input_verify_timeout", 3.0))
         self._ui_verify_timeout = float(win_cfg.get("ui_verify_timeout", 4.0))
         self._require_ui_verify = bool(win_cfg.get("require_ui_verify", True))
+        self._ensure_full_layout = bool(win_cfg.get("ensure_full_layout", True))
         self._last_result: SendResult | None = None
         self._last_binding_error: dict[str, Any] | None = None
         self._last_background_capability: dict[str, Any] = {}
@@ -554,6 +555,9 @@ class WindowsUIASender:
         if background:
             return self._open_visible_session_without_mouse(driver, keyword)
 
+        driver = self._ensure_foreground_navigation(driver)
+        if driver is None:
+            return False
         search_box = driver._search_box(driver._win)
         if search_box is None:
             return False
@@ -658,6 +662,73 @@ class WindowsUIASender:
                 time.sleep(0.2)
             return False
         return False
+
+    @staticmethod
+    def _navigation_controls_ready(driver: Any) -> bool:
+        """Check whether the visible UIA tree exposes search and sessions."""
+        try:
+            session_list = driver._win.ListControl(AutomationId="session_list")
+            if not session_list.Exists(0.3, 0.1):
+                return False
+        except Exception:
+            return False
+        try:
+            return driver._search_box(driver._win) is not None
+        except Exception:
+            return False
+
+    def _ensure_foreground_navigation(self, driver: Any):
+        """Materialize the foreground navigation layout without mouse input."""
+        if self._navigation_controls_ready(driver):
+            return driver
+        if not self._ensure_full_layout:
+            self._last_binding_error = {
+                "status": "uia_layout_unavailable",
+                "error_code": "navigation_controls_missing",
+                "error_message": "前台 UIA 未发现搜索框或会话列表，且已关闭完整布局恢复",
+            }
+            return None
+
+        try:
+            hwnd = int(getattr(driver._win, "NativeWindowHandle", 0) or 0)
+            if not hwnd or os.name != "nt":
+                raise RuntimeError("绑定窗口没有可用 HWND")
+            user32 = ctypes.windll.user32
+            user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+            user32.ShowWindow.restype = wintypes.BOOL
+            # SW_MAXIMIZE materializes the left navigation tree in Weixin 4.x.
+            if not user32.ShowWindow(wintypes.HWND(hwnd), 3):
+                logger.debug("UIA 完整布局恢复未报告窗口状态变化 | hwnd=%s", hwnd)
+        except Exception as exc:
+            self._last_binding_error = {
+                "status": "uia_layout_unavailable",
+                "error_code": "navigation_layout_restore_failed",
+                "error_message": f"无法恢复前台 UIA 完整布局: {exc}",
+            }
+            return None
+
+        binding = self._binding_info()
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            try:
+                window = driver._find_main()
+                if window is not None:
+                    if not self._window_matches_bound_pid(driver, window, binding["bound_pid"]):
+                        return None
+                    driver._win = window
+                    if self._navigation_controls_ready(driver):
+                        logger.info("已恢复前台 UIA 完整导航布局 | hwnd=%s", hwnd)
+                        return driver
+            except Exception:
+                pass
+            time.sleep(0.2)
+
+        self._last_binding_error = {
+            "status": "uia_layout_unavailable",
+            "error_code": "navigation_controls_missing",
+            "error_message": "恢复窗口布局后仍未发现搜索框或会话列表",
+        }
+        return None
 
     @staticmethod
     def _find_send_button(driver: Any, input_control: Any) -> Any:
@@ -1061,6 +1132,17 @@ class WindowsUIASender:
                     "error_message", "未找到可访问的绑定账号 UIA 主窗口"
                 )
                 return payload
+            if probe_method == "foreground_uia":
+                driver = self._ensure_foreground_navigation(driver)
+                if driver is None:
+                    binding_error = self._last_binding_error or {}
+                    payload["error_code"] = binding_error.get(
+                        "error_code", "navigation_controls_missing"
+                    )
+                    payload["error"] = binding_error.get(
+                        "error_message", "前台 UIA 导航控件不可用"
+                    )
+                    return payload
             window = getattr(driver, "_win", None)
             if window is None:
                 payload["error"] = "未找到可访问的 mmui::MainWindow"

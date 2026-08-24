@@ -207,6 +207,7 @@ def test_uia_diagnose_resolves_window_pid_without_sending(monkeypatch):
         "_ensure_driver_window",
         lambda method=None: probe_methods.append(method) or driver,
     )
+    monkeypatch.setattr(sender, "_ensure_foreground_navigation", lambda value: value)
     monkeypatch.setattr(
         sender,
         "_binding_info",
@@ -252,6 +253,16 @@ def test_uia_diagnose_reports_window_initialization_error(monkeypatch):
 
     assert result["uia_available"] is False
     assert result["error_code"] == "uia_window_unavailable"
+
+
+def test_foreground_navigation_can_be_disabled_without_window_resize(monkeypatch):
+    sender = WindowsUIASender()
+    sender._ensure_full_layout = False
+    driver = FakeDiagnosticDriver()
+    monkeypatch.setattr(sender, "_navigation_controls_ready", lambda _driver: False)
+
+    assert sender._ensure_foreground_navigation(driver) is None
+    assert sender._last_binding_error["error_code"] == "navigation_controls_missing"
 
 
 def test_uia_binding_refuses_to_guess_when_pid_is_unknown(monkeypatch):
