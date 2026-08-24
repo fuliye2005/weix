@@ -96,6 +96,7 @@ windows_sender:
   method: uia
   send_mode: foreground_uia
   background_mode: false
+  ensure_full_layout: true
   allow_mouse_fallback: false
   send_key_fallback: none
   require_ui_verify: true
@@ -104,7 +105,8 @@ windows_sender:
   park_after_send: false
 ```
 
-`foreground_uia` 允许短暂激活微信窗口，但不移动鼠标、不依赖坐标点击；发送时必须先通过所选账号的 PID 绑定校验，
+`foreground_uia` 允许短暂激活微信窗口，但不移动鼠标、不依赖坐标点击；如果窗口过窄导致左侧导航控件被隐藏，
+`ensure_full_layout: true` 会通过 Win32 `ShowWindow(SW_MAXIMIZE)` 恢复完整布局。发送时必须先通过所选账号的 PID 绑定校验，
 再写入输入框并调用发送按钮 Pattern。`background_uia` 只使用已经存在的 UIA 控件树，不主动激活窗口；
 如果目标会话或控件树不可访问，会记录明确错误码并失败，不会偷偷回退到键盘或鼠标。
 

@@ -66,6 +66,8 @@ windows_sender:
   # 生产主路径：短暂激活微信，但不移动鼠标、不使用坐标点击
   send_mode: foreground_uia
   background_mode: false
+  # 窄窗口时通过 Win32 ShowWindow 恢复完整导航布局，不执行鼠标或坐标点击
+  ensure_full_layout: true
   allow_mouse_fallback: false
   # 只有显式设置 enter/ctrl_enter 才允许按键兜底，默认只调用真实发送按钮 Pattern
   send_key_fallback: none

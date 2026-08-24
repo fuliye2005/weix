@@ -16,7 +16,7 @@
 
 ## 当前结论
 
-UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可以被热激活，项目也已经存在发送按钮查找逻辑。当前发送流程已经接入 UIA 同步执行入口，会真正调用发送按钮的 Pattern，并返回分阶段结果；发送后支持 UI、数据库和 pending 查库确认。真实微信窗口和真实联系人仍未做最终验收。
+UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可以被热激活，项目也已经存在发送按钮查找逻辑。当前发送流程已经接入 UIA 同步执行入口，会真正调用发送按钮的 Pattern，并返回分阶段结果；发送后支持 UI、数据库和 pending 查库确认。真实机器上的只读 UIA、搜索切换和正文回读已经验证，但真实发送按钮和连续发送验收仍未完成。
 
 管理界面现在可以执行只读 UIA 检测，返回选中账号、绑定 PID、窗口句柄、当前会话、搜索框、聊天输入框和发送按钮的 Pattern 信息。检测不会发送消息，也不会主动移动鼠标。
 
@@ -47,6 +47,8 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 - [x] 修复 UIA 结构化发送结果调用了缺失同步入口的问题；现在 `foreground_uia`、`background_uia` 和 `auto` 都会进入统一的 UIA 执行器。
 - [x] 增加输入框写入后的 ValuePattern 回读校验。
 - [x] 增加 UIA 控件诊断方法，返回账号、PID、窗口、搜索框、输入框、发送按钮和 Pattern 信息。
+- [x] 前台 UIA 在窗口过窄时通过 Win32 `ShowWindow(SW_MAXIMIZE)` 恢复搜索框和会话列表，不移动鼠标、不使用坐标点击。
+- [x] 搜索结果和可见会话遇到同名候选时返回 `ambiguous_search_result`，打开会话后同时校验标题和 `chat_input_field`。
 - [x] 增加 `GET /api/platform/uia/diagnose` 诊断接口，并在聊天配置页增加“UIA 检测”按钮和结果弹窗。
 - [x] 修复 UIA 诊断窗口 PID 获取：优先使用 UIA 驱动能力，必要时使用 Win32 `GetWindowThreadProcessId`，避免调用不存在的发送器方法。
 - [x] 管理界面提供后端重启按钮，账号切换后可以重新绑定数据库、监听器和微信窗口。
@@ -132,7 +134,8 @@ UIA Pattern 调用成功不等于消息已经落盘。系统先记录 `invoke` �
 - UIA 检测界面前端构建：通过；Vite 仅报告已有的大 chunk 警告。
 - Windows 数据目录、临时清理和截图测试已完成隔离修复，不再依赖宿主机真实微信目录或污染后续测试。
 - 后端全量测试：`137 passed, 4 skipped`；4 个跳过项是默认关闭的真实微信集成测试，设置 `WEIX_RUN_LIVE_WECHAT_TESTS=1` 才会运行。
-- UIA 真实控件和数据库回读测试：尚未执行，仍不能据此宣称真实发送已完成。
+- Windows 真实机器只读验证：数据库诊断 `result: ok`（210 条消息、177 条文本消息）；UIA 绑定账号/PID/窗口 PID 一致；最大化后搜索框和会话列表可见；通过 UIA 打开“文件传输助手”成功；ValuePattern 草稿写入、回读、清空成功；以上均未调用发送按钮。
+- UIA 真实发送和数据库回读验收：尚未执行，仍不能据此宣称真实发送已完成。
 
 ## 最近提交
 
@@ -141,3 +144,7 @@ UIA Pattern 调用成功不等于消息已经落盘。系统先记录 `invoke` �
 - `1db76cd feat: expose message delivery logs`
 - `d26ff82 fix: settle pending deliveries without resending`
 - `c9caba4 feat: expose delivery and UIA diagnostics in admin`
+- `b05643f fix: recognize nested Windows 4.x message databases`
+- `15c4580 fix: initialize UIA tree during diagnostics`
+- `102c7a8 fix: restore foreground UIA navigation layout`
+- `c4b5a5a fix: harden UIA navigation verification`
