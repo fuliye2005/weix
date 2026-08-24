@@ -10,6 +10,7 @@ _MESSAGE_COLUMNS: dict[str, str] = {
     "attempt_id": "VARCHAR(64)",
     "send_method": "VARCHAR(32)",
     "reply_source": "VARCHAR(32)",
+    "error_stage": "VARCHAR(32)",
     "error_code": "VARCHAR(64)",
     "error_message": "TEXT",
     "sent_at": "DATETIME",

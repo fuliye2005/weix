@@ -40,6 +40,7 @@ class MessageService:
             attempt_id=msg.get("attempt_id"),
             send_method=msg.get("send_method"),
             reply_source=msg.get("reply_source"),
+            error_stage=msg.get("error_stage"),
             error_code=msg.get("error_code"),
             error_message=msg.get("error_message"),
             sent_at=msg.get("sent_at"),
@@ -103,6 +104,7 @@ class MessageService:
             "status",
             "send_method",
             "error_code",
+            "error_stage",
             "error_message",
             "sent_at",
             "target_id",
@@ -117,7 +119,7 @@ class MessageService:
 
     async def get_messages(
         self, room_id: str = "", user_id: str = "", start_date: str = "", end_date: str = "",
-        page: int = 1, size: int = 20,
+        page: int = 1, size: int = 20, direction: str = "", status: str = "",
     ) -> tuple[list[Message], int]:
         """Query messages with pagination and optional date range."""
         query = select(Message)
@@ -129,6 +131,12 @@ class MessageService:
         if user_id:
             query = query.where(Message.sender_wxid == user_id)
             count_q = count_q.where(Message.sender_wxid == user_id)
+        if direction:
+            query = query.where(Message.direction == direction)
+            count_q = count_q.where(Message.direction == direction)
+        if status:
+            query = query.where(Message.status == status)
+            count_q = count_q.where(Message.status == status)
         if start_date:
             query = query.where(func.date(Message.create_time) >= start_date)
             count_q = count_q.where(func.date(Message.create_time) >= start_date)

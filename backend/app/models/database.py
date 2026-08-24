@@ -26,6 +26,7 @@ class Message(Base):
     attempt_id = Column(String(64), unique=True, index=True)
     send_method = Column(String(32))
     reply_source = Column(String(32))
+    error_stage = Column(String(32))
     error_code = Column(String(64))
     error_message = Column(Text)
     sent_at = Column(DateTime)

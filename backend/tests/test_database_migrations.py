@@ -26,6 +26,7 @@ def test_messages_migration_adds_new_log_columns_to_existing_table():
         assert "reply_to_msg_id" in columns
         assert "attempt_id" in columns
         assert "error_message" in columns
+        assert "error_stage" in columns
         assert "target_id" in columns
 
         row = connection.execute(

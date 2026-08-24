@@ -9,6 +9,23 @@
         <el-form-item label="用户">
           <el-input v-model="filter.user_id" placeholder="wxid" clearable />
         </el-form-item>
+        <el-form-item label="方向">
+          <el-select v-model="filter.direction" placeholder="全部" clearable style="width: 120px">
+            <el-option label="收到" value="inbound" />
+            <el-option label="发出" value="outbound" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-select v-model="filter.status" placeholder="全部" clearable style="width: 150px">
+            <el-option label="已收到" value="received" />
+            <el-option label="已生成" value="generated" />
+            <el-option label="发送中" value="sending" />
+            <el-option label="已发送" value="sent" />
+            <el-option label="待验证" value="pending_verify" />
+            <el-option label="失败" value="failed" />
+            <el-option label="跳过" value="skipped" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="时间范围">
           <el-date-picker
             v-model="filter.dateRange"
@@ -29,8 +46,24 @@
 
     <el-table :data="messages" stripe v-loading="loading" border style="width: 100%">
       <el-table-column prop="msg_id" label="消息ID" width="180" show-overflow-tooltip />
+      <el-table-column label="方向" width="80">
+        <template #default="{ row }">
+          <el-tag size="small" :type="row.direction === 'outbound' ? 'warning' : 'info'">
+            {{ directionLabel(row.direction) }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="状态" width="105">
+        <template #default="{ row }">
+          <el-tag size="small" :type="statusType(row.status)">
+            {{ statusLabel(row.status) }}
+          </el-tag>
+        </template>
+      </el-table-column>
       <el-table-column prop="sender_name" label="发送者" width="120" />
       <el-table-column prop="room_name" label="群聊" width="150" show-overflow-tooltip />
+      <el-table-column prop="send_method" label="发送方式" width="125" show-overflow-tooltip />
+      <el-table-column prop="reply_source" label="回复来源" width="95" />
       <el-table-column label="类型" width="80">
         <template #default="{ row }">
           <el-tag size="small">{{ typeLabel(row.msg_type) }}</el-tag>
@@ -60,7 +93,18 @@
         <el-descriptions-item label="发送者">{{ detail.sender_name }} ({{ detail.sender_wxid }})</el-descriptions-item>
         <el-descriptions-item label="群聊">{{ detail.room_name || '私聊' }} ({{ detail.room_id }})</el-descriptions-item>
         <el-descriptions-item label="类型">{{ typeLabel(detail.msg_type) }}</el-descriptions-item>
+        <el-descriptions-item label="方向">{{ directionLabel(detail.direction) }}</el-descriptions-item>
+        <el-descriptions-item label="状态">{{ statusLabel(detail.status) }}</el-descriptions-item>
+        <el-descriptions-item label="发送方式">{{ detail.send_method || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="回复来源">{{ detail.reply_source || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="尝试ID">{{ detail.attempt_id || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="关联消息">{{ detail.reply_to_msg_id || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="错误阶段">{{ detail.error_stage || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="错误原因">
+          <div style="white-space: pre-wrap; max-height: 120px; overflow: auto">{{ detail.error_message || '-' }}</div>
+        </el-descriptions-item>
         <el-descriptions-item label="时间">{{ detail.create_time }}</el-descriptions-item>
+        <el-descriptions-item label="发送完成">{{ detail.sent_at || '-' }}</el-descriptions-item>
         <el-descriptions-item label="内容">
           <div style="white-space: pre-wrap; max-height: 200px; overflow: auto">{{ detail.content }}</div>
         </el-descriptions-item>
@@ -84,6 +128,8 @@ const detail = ref<any>({})
 const filter = reactive<any>({
   room_id: '',
   user_id: '',
+  direction: '',
+  status: '',
   dateRange: null,
 })
 
@@ -94,12 +140,39 @@ function typeLabel(type: number) {
   return map[type] || '其他'
 }
 
+function directionLabel(direction: string) {
+  return direction === 'outbound' ? '发出' : '收到'
+}
+
+function statusLabel(status: string) {
+  const map: Record<string, string> = {
+    received: '已收到',
+    generated: '已生成',
+    sending: '发送中',
+    sent: '已发送',
+    pending_verify: '待验证',
+    failed: '失败',
+    skipped: '跳过',
+  }
+  return map[status] || status || '未知'
+}
+
+function statusType(status: string) {
+  if (status === 'sent' || status === 'received') return 'success'
+  if (status === 'pending_verify' || status === 'sending') return 'warning'
+  if (status === 'failed') return 'danger'
+  if (status === 'skipped') return 'info'
+  return ''
+}
+
 async function loadMessages() {
   loading.value = true
   try {
     const params: any = { page: pagination.page, size: pagination.size }
     if (filter.room_id) params.room_id = filter.room_id
     if (filter.user_id) params.user_id = filter.user_id
+    if (filter.direction) params.direction = filter.direction
+    if (filter.status) params.status = filter.status
     if (filter.dateRange) {
       params.start_date = filter.dateRange[0]
       params.end_date = filter.dateRange[1]
@@ -115,6 +188,8 @@ async function loadMessages() {
 function resetFilter() {
   filter.room_id = ''
   filter.user_id = ''
+  filter.direction = ''
+  filter.status = ''
   filter.dateRange = null
   pagination.page = 1
   loadMessages()

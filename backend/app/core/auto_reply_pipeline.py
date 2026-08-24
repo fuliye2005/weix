@@ -621,6 +621,7 @@ class AutoReplyPipeline:
                     outbound.attempt_id,
                     status=result.status,
                     send_method=result.method,
+                    error_stage=result.stage,
                     error_code=result.error_code,
                     error_message=result.error_message,
                     sent_at=datetime.now() if result.status == "sent" else None,

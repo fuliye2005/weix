@@ -25,6 +25,18 @@ class MessageOut(BaseModel):
     room_id: str = ""
     room_name: str = ""
     is_group: bool = False
+    direction: str = "inbound"
+    status: str = "received"
+    reply_to_msg_id: Optional[str] = None
+    attempt_id: str = ""
+    send_method: str = ""
+    reply_source: str = ""
+    error_stage: str = ""
+    error_code: str = ""
+    error_message: str = ""
+    sent_at: Optional[datetime] = None
+    target_id: str = ""
+    target_name: str = ""
     create_time: datetime = Field(default_factory=datetime.now)
 
 
@@ -39,6 +51,9 @@ class SendMessageRequest(BaseModel):
     msg: str
     receiver: str
     aters: str = ""
+    is_group: bool = False
+    target_id: str = ""
+    target_name: str = ""
 
 
 # --- Auto Reply Rules ---
