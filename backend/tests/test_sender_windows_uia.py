@@ -118,6 +118,32 @@ class FakeDiagnosticDriver:
         return "测试联系人"
 
 
+class FakeSession:
+    def __init__(self, name, aid=""):
+        self.Name = name
+        self.AutomationId = aid
+
+
+class FakeSessionList:
+    def __init__(self, sessions):
+        self._sessions = sessions
+
+    def Exists(self, *_args):
+        return True
+
+    def GetChildren(self):
+        return list(self._sessions)
+
+
+class FakeVisibleDriver(FakeDriver):
+    def __init__(self, sessions):
+        super().__init__()
+        self._session_list = FakeSessionList(sessions)
+
+    def ListControl(self, **_kwargs):
+        return self._session_list
+
+
 @pytest.mark.asyncio
 async def test_uia_sender_writes_text_without_click(monkeypatch):
     sender = WindowsUIASender()
@@ -263,6 +289,46 @@ def test_foreground_navigation_can_be_disabled_without_window_resize(monkeypatch
 
     assert sender._ensure_foreground_navigation(driver) is None
     assert sender._last_binding_error["error_code"] == "navigation_controls_missing"
+
+
+def test_visible_session_refuses_duplicate_names(monkeypatch):
+    sender = WindowsUIASender()
+    driver = FakeVisibleDriver([
+        FakeSession("文件传输助手", "session_item_1"),
+        FakeSession("文件传输助手", "session_item_2"),
+    ])
+    opened = sender._open_visible_session_without_mouse(driver, "文件传输助手")
+
+    assert opened is False
+    assert sender._last_navigation_error["error_code"] == "ambiguous_search_result"
+
+
+def test_search_open_requires_chat_input_after_title_match(monkeypatch):
+    sender = WindowsUIASender()
+    driver = FakeDriver()
+    cell = FakeSession("文件传输助手", "search_item_1")
+    monkeypatch.setattr(sender, "_set_text_without_mouse", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(driver, "_chat_input", lambda: None)
+    monkeypatch.setattr(driver, "current_chat", lambda: "文件传输助手")
+    monkeypatch.setattr(
+        driver,
+        "_search_box",
+        lambda *_args, **_kwargs: driver.input,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        driver,
+        "_collect_results",
+        lambda _keyword: [{"cell": cell, "name": "文件传输助手", "section": "联系人"}],
+        raising=False,
+    )
+    monkeypatch.setattr(sender, "_ensure_foreground_navigation", lambda value: value)
+    monkeypatch.setattr(sender, "_invoke_without_mouse", lambda _control: True)
+
+    opened = sender._open_chat_without_mouse(driver, "文件传输助手", False, background_mode=False)
+
+    assert opened is False
+    assert sender._last_navigation_error["error_code"] == "chat_open_verification_failed"
 
 
 def test_uia_binding_refuses_to_guess_when_pid_is_unknown(monkeypatch):

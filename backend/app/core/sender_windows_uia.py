@@ -152,6 +152,7 @@ class WindowsUIASender:
         self._ensure_full_layout = bool(win_cfg.get("ensure_full_layout", True))
         self._last_result: SendResult | None = None
         self._last_binding_error: dict[str, Any] | None = None
+        self._last_navigation_error: dict[str, Any] | None = None
         self._last_background_capability: dict[str, Any] = {}
 
     async def send_text(
@@ -552,6 +553,7 @@ class WindowsUIASender:
         background_mode: bool | None = None,
     ) -> bool:
         background = self._background_mode if background_mode is None else background_mode
+        self._last_navigation_error = None
         if background:
             return self._open_visible_session_without_mouse(driver, keyword)
 
@@ -596,6 +598,10 @@ class WindowsUIASender:
                 break
 
         if not results:
+            self._last_navigation_error = {
+                "error_code": "search_result_not_found",
+                "error_message": f"搜索未找到目标会话: {used_keyword}",
+            }
             return False
 
         exact = [item for item in results if item.get("name") == used_keyword]
@@ -605,17 +611,30 @@ class WindowsUIASender:
                 used_keyword,
                 len(results),
             )
+            self._last_navigation_error = {
+                "error_code": "ambiguous_search_result",
+                "error_message": f"搜索结果不唯一: {used_keyword}",
+                "count": len(results),
+            }
             return False
         chosen = (exact or results)[0]
         if not self._invoke_without_mouse(chosen["cell"]):
+            self._last_navigation_error = {
+                "error_code": "search_result_invoke_failed",
+                "error_message": f"无法打开搜索结果: {used_keyword}",
+            }
             return False
         expected_names = {chosen.get("name"), used_keyword}
         deadline = time.monotonic() + 2.5
         while time.monotonic() < deadline:
             current_name = driver.current_chat()
-            if current_name and current_name in expected_names:
+            if current_name and current_name in expected_names and driver._chat_input() is not None:
                 return True
             time.sleep(0.2)
+        self._last_navigation_error = {
+            "error_code": "chat_open_verification_failed",
+            "error_message": f"目标会话已调用打开动作，但标题或输入框校验失败: {used_keyword}",
+        }
         return False
 
     def _open_visible_session_without_mouse(self, driver: Any, keyword: str) -> bool:
@@ -642,6 +661,7 @@ class WindowsUIASender:
         except Exception:
             return False
 
+        matches = []
         for session in sessions:
             try:
                 name = (session.Name or "").split("\n", 1)[0].strip()
@@ -652,15 +672,35 @@ class WindowsUIASender:
                 f"session_item_{candidate}" for candidate in candidates
             }:
                 continue
-            if not self._invoke_without_mouse(session):
-                return False
-            deadline = time.monotonic() + 2.5
-            while time.monotonic() < deadline:
-                current_name = driver.current_chat()
-                if current_name and current_name in candidates:
-                    return True
-                time.sleep(0.2)
+            matches.append(session)
+        if len(matches) != 1:
+            self._last_navigation_error = {
+                "error_code": "ambiguous_search_result" if matches else "search_result_not_found",
+                "error_message": (
+                    f"可见会话结果不唯一: {keyword}"
+                    if matches
+                    else f"可见会话列表未找到目标: {keyword}"
+                ),
+                "count": len(matches),
+            }
             return False
+        session = matches[0]
+        if not self._invoke_without_mouse(session):
+            self._last_navigation_error = {
+                "error_code": "search_result_invoke_failed",
+                "error_message": f"无法打开可见会话: {keyword}",
+            }
+            return False
+        deadline = time.monotonic() + 2.5
+        while time.monotonic() < deadline:
+            current_name = driver.current_chat()
+            if current_name and current_name in candidates and driver._chat_input() is not None:
+                return True
+            time.sleep(0.2)
+        self._last_navigation_error = {
+            "error_code": "chat_open_verification_failed",
+            "error_message": f"可见会话打开后标题或输入框校验失败: {keyword}",
+        }
         return False
 
     @staticmethod
@@ -1008,7 +1048,17 @@ class WindowsUIASender:
                         background_mode=background,
                     )
                 if not opened:
-                    return result.fail("search", "chat_open_failed", "无法唯一打开目标会话")
+                    navigation_error = self._last_navigation_error or {}
+                    return result.fail(
+                        "search",
+                        navigation_error.get("error_code", "chat_open_failed"),
+                        navigation_error.get("error_message", "无法唯一打开目标会话"),
+                        **{
+                            key: value
+                            for key, value in navigation_error.items()
+                            if key not in {"error_code", "error_message"}
+                        },
+                    )
                 input_control = driver._chat_input()
 
             if input_control is None:
