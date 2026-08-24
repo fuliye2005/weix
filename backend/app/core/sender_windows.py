@@ -1041,6 +1041,9 @@ class WindowsSender(BaseMessageSender):
         since_ts: int,
         target_id: str = "",
     ) -> bool:
+        # 微信有时先把消息写入库，再返回 UIA 调用结果；允许少量落盘顺序偏差，
+        # 但仍然保留 target_id、本人发送标记和正文匹配，避免跨会话误判。
+        query_since_ts = max(0, int(since_ts) - 3)
         normalized_msg = WindowsSender._normalize_text(msg)
         if not normalized_msg or reader._sqlite_conn is None:
             return False
@@ -1065,7 +1068,7 @@ class WindowsSender(BaseMessageSender):
                         f'FROM "{table}" '
                         f'WHERE create_time >= ? AND local_type = 1 '
                         f'ORDER BY local_id DESC LIMIT 20',
-                        (since_ts,),
+                        (query_since_ts,),
                     )
                 except Exception:
                     continue
@@ -1078,7 +1081,7 @@ class WindowsSender(BaseMessageSender):
             return False
 
         try:
-            params: list[object] = [since_ts * 1000]
+            params: list[object] = [query_since_ts * 1000]
             talker_filter = ""
             if target_id:
                 talker_filter = "AND msg_talker = ?"

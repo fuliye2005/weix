@@ -344,6 +344,40 @@ def test_reader_has_recent_self_text_normalizes_group_prefix():
     ) is True
 
 
+def test_reader_has_recent_self_text_allows_database_write_order_skew():
+    from app.core.sender_windows import WindowsSender
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE Msg_private (local_id INTEGER, create_time INTEGER, real_sender_id INTEGER, "
+        "message_content TEXT, local_type INTEGER, status INTEGER, origin_source INTEGER, server_seq INTEGER)"
+    )
+    # The database row can be stamped just before the UIA call returns.
+    conn.execute(
+        "INSERT INTO Msg_private VALUES (1, 89, 2, '先写库', 1, 2, 1, 0)"
+    )
+
+    class Reader:
+        _sqlite_conn = conn
+
+        def _has_msg_shard_tables(self):
+            return True
+
+        def _get_v4_msg_tables(self):
+            return [("Msg_private", "wxid_friend")]
+
+        def _is_self_sent_v4_row(self, _row):
+            return True
+
+        def _decode_message_content(self, content):
+            return str(content or "")
+
+    assert WindowsSender._reader_has_recent_self_text(
+        Reader(), "先写库", 90, target_id="wxid_friend"
+    ) is True
+
+
 @pytest.mark.asyncio
 async def test_verify_pending_result_only_reads_database(monkeypatch):
     from app.core.send_result import SendResult
