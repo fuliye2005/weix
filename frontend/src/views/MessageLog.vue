@@ -62,7 +62,7 @@
       </el-table-column>
       <el-table-column label="发送者/对象" width="150" show-overflow-tooltip>
         <template #default="{ row }">
-          {{ row.direction === 'outbound' ? (row.target_name || row.target_id || '-') : (row.sender_name || row.sender_wxid || '-') }}
+          {{ senderLabel(row) }}
         </template>
       </el-table-column>
       <el-table-column label="会话" width="150" show-overflow-tooltip>
@@ -100,10 +100,11 @@
       <el-descriptions :column="1" border>
         <el-descriptions-item label="消息ID">{{ detail.msg_id }}</el-descriptions-item>
         <el-descriptions-item label="发送者/对象">
-          {{ detail.direction === 'outbound' ? (detail.target_name || detail.target_id || '-') : (detail.sender_name || detail.sender_wxid || '-') }}
-          <span v-if="detail.direction !== 'outbound' && detail.sender_wxid"> ({{ detail.sender_wxid }})</span>
+          {{ senderLabel(detail) }}
+          <span v-if="inboundSenderId(detail)"> ({{ inboundSenderId(detail) }})</span>
         </el-descriptions-item>
         <el-descriptions-item label="会话">{{ conversationLabel(detail) }}</el-descriptions-item>
+        <el-descriptions-item label="群名">{{ detail.is_group ? (detail.room_name || detail.room_id || '-') : '-' }}</el-descriptions-item>
         <el-descriptions-item label="目标会话 ID">{{ detail.target_id || '-' }}</el-descriptions-item>
         <el-descriptions-item label="类型">{{ typeLabel(detail.msg_type) }}</el-descriptions-item>
         <el-descriptions-item label="方向">{{ directionLabel(detail.direction) }}</el-descriptions-item>
@@ -159,6 +160,19 @@ function typeLabel(type: number) {
 
 function directionLabel(direction: string) {
   return direction === 'outbound' ? '发出' : '收到'
+}
+
+function inboundSenderId(row: any) {
+  if (!row || row.direction === 'outbound') return ''
+  if (row.is_group && row.sender_wxid && row.sender_wxid === row.room_id) return ''
+  return row.sender_wxid || ''
+}
+
+function senderLabel(row: any) {
+  if (!row) return '-'
+  if (row.direction === 'outbound') return row.target_name || row.target_id || '-'
+  if (row.is_group && row.sender_wxid === row.room_id) return row.sender_name || '未知成员'
+  return row.sender_name || inboundSenderId(row) || (row.is_group ? '未知成员' : '未知用户')
 }
 
 function conversationLabel(row: any) {
