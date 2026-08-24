@@ -44,6 +44,10 @@
               <el-icon><RefreshRight /></el-icon>
               {{ restartRequired ? '重启后端使账号生效' : '重启后端' }}
             </el-button>
+            <el-button type="info" plain :loading="uiaDiagnosing" @click="diagnoseUiaNow">
+              <el-icon><Monitor /></el-icon>
+              UIA 检测
+            </el-button>
             <span v-if="restartRequired">切换工作账号后，重启后端才会重新绑定数据库和微信窗口。</span>
             <span v-else>重启后端会重新加载配置、数据库和自动回复流水线。</span>
           </div>
@@ -120,14 +124,71 @@
         </el-form-item>
       </el-form>
     </el-card>
+
+    <el-dialog v-model="uiaDialogVisible" title="UIA 诊断结果" width="720px">
+      <template v-if="uiaDiagnosis">
+        <el-alert
+          :title="uiaDiagnosis.uia_available ? 'UIA 控件树可访问' : 'UIA 控件树不可用'"
+          :type="uiaDiagnosis.uia_available ? 'success' : 'error'"
+          show-icon
+          :closable="false"
+        />
+        <el-descriptions class="uia-descriptions" :column="2" border>
+          <el-descriptions-item label="发送模式">
+            {{ uiaDiagnosis.method || '-' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="当前会话">
+            {{ uiaDiagnosis.current_chat || '-' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="选中账号">
+            {{ uiaDiagnosis.selected_account || '-' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="绑定 PID">
+            {{ uiaDiagnosis.bound_pid || '-' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="驱动 PID">
+            {{ uiaDiagnosis.driver_pid || '-' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="会话列表">
+            {{ uiaDiagnosis.session_list ? '已发现' : '未发现' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="微信窗口" :span="2">
+            <template v-if="uiaDiagnosis.window">
+              {{ uiaDiagnosis.window.name || '-' }} · {{ uiaDiagnosis.window.class_name || '-' }}
+              · HWND {{ uiaDiagnosis.window.hwnd || '-' }} · PID {{ uiaDiagnosis.window.pid || '-' }}
+            </template>
+            <span v-else>-</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="搜索框" :span="2">
+            {{ controlSummary(uiaDiagnosis.search_box) }}
+          </el-descriptions-item>
+          <el-descriptions-item label="聊天输入框" :span="2">
+            {{ controlSummary(uiaDiagnosis.chat_input) }}
+          </el-descriptions-item>
+          <el-descriptions-item label="发送按钮" :span="2">
+            {{ controlSummary(uiaDiagnosis.send_button) }}
+          </el-descriptions-item>
+          <el-descriptions-item v-if="uiaDiagnosis.error" label="错误" :span="2">
+            <span class="uia-error">{{ uiaDiagnosis.error }}</span>
+          </el-descriptions-item>
+        </el-descriptions>
+      </template>
+      <template #footer>
+        <el-button @click="uiaDialogVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="uiaDiagnosing" @click="diagnoseUiaNow">
+          <el-icon><RefreshRight /></el-icon>
+          重新检测
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { reactive, ref, onMounted } from 'vue'
-import { getChatConfig, updateChatConfig, getContacts, searchChatrooms, searchContactsApi, getWechatAccounts, selectWechatAccount, restartBackend as restartBackendApi, getHealth } from '../api'
+import { getChatConfig, updateChatConfig, getContacts, searchChatrooms, searchContactsApi, getWechatAccounts, selectWechatAccount, restartBackend as restartBackendApi, getHealth, diagnoseUia } from '../api'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { RefreshRight } from '@element-plus/icons-vue'
+import { Monitor, RefreshRight } from '@element-plus/icons-vue'
 
 const form = reactive<any>({
   enabled: true,
@@ -157,6 +218,9 @@ const accountLoading = ref(false)
 const accountHint = ref('')
 const restartRequired = ref(false)
 const restarting = ref(false)
+const uiaDiagnosing = ref(false)
+const uiaDialogVisible = ref(false)
+const uiaDiagnosis = ref<any>(null)
 
 function roomName(id: string) {
   const found = allChatrooms.value.find((r: any) => r.room_id === id)
@@ -307,6 +371,34 @@ async function restartBackendNow() {
   }
 }
 
+function controlSummary(control: any) {
+  if (!control) return '未发现'
+  const patterns = Object.entries(control.patterns || {})
+    .filter(([, available]) => Boolean(available))
+    .map(([name]) => name)
+  const name = control.name || '无名称'
+  return patterns.length ? `${name} · ${patterns.join('、')}` : `${name} · 未发现可用模式`
+}
+
+async function diagnoseUiaNow() {
+  uiaDiagnosing.value = true
+  uiaDialogVisible.value = true
+  try {
+    const res = await diagnoseUia()
+    uiaDiagnosis.value = res.data || {}
+    if (uiaDiagnosis.value.uia_available) {
+      ElMessage.success('UIA 检测完成')
+    } else {
+      ElMessage.warning(uiaDiagnosis.value.error || '未找到可用的 UIA 控件树')
+    }
+  } catch (error: any) {
+    uiaDiagnosis.value = { uia_available: false, error: error?.message || 'UIA 检测失败' }
+    ElMessage.error(uiaDiagnosis.value.error)
+  } finally {
+    uiaDiagnosing.value = false
+  }
+}
+
 function accountLabel(account: any) {
   const flags: string[] = []
   if (account.active) flags.push('当前运行')
@@ -374,6 +466,15 @@ async function saveConfig() {
   color: #909399;
   font-size: 12px;
   line-height: 1.5;
+}
+
+.uia-descriptions {
+  margin-top: 16px;
+}
+
+.uia-error {
+  color: #f56c6c;
+  word-break: break-word;
 }
 
 @media (max-width: 640px) {
