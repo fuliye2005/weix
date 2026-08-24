@@ -401,3 +401,78 @@ def test_auto_does_not_retry_after_send_action(monkeypatch):
 
     assert result is attempted
     assert calls == [True]
+
+
+def test_uia_retries_text_after_readback_mismatch(monkeypatch):
+    sender = WindowsUIASender()
+    sender._send_mode = "foreground_uia"
+    sender._send_key_fallback = "none"
+    sender._require_ui_verify = False
+    driver = FakeDriver()
+    calls = []
+
+    monkeypatch.setattr(sender, "_ensure_driver_window", lambda _method=None: driver)
+    monkeypatch.setattr(sender, "_find_send_button", lambda *_args: FakeSendButton())
+
+    def write_text(_driver, control, text, allow_focus_fallback=True, prefer_focus_fallback=False):
+        calls.append(prefer_focus_fallback)
+        control.value_pattern.value = text if prefer_focus_fallback else "错误正文"
+        return True
+
+    monkeypatch.setattr(sender, "_set_text_without_mouse", write_text)
+
+    def invoke(_control):
+        driver.input.value_pattern.value = ""
+        return True, "InvokePattern"
+
+    monkeypatch.setattr(sender, "_invoke_control", invoke)
+
+    result = sender._send_text_once(
+        "正确正文",
+        "测试联系人",
+        False,
+        "wxid_target",
+        "foreground_uia",
+    )
+
+    assert result.success is True
+    assert calls == [False, True]
+    assert result.draft_cleared is True
+
+
+def test_uia_rebuilds_driver_when_bound_account_changes(monkeypatch):
+    sender = WindowsUIASender()
+    binding = {
+        "selected_account": "wxid_account_a",
+        "bound_account": "wxid_account_a",
+        "bound_pid": 5678,
+        "status": "bound",
+        "error_code": "",
+        "error_message": "",
+    }
+    created = []
+
+    class FakeBoundDriver:
+        def __init__(self, pid):
+            self.pid = pid
+
+    class FakeDriverFactory:
+        def __init__(self, pid):
+            created.append(pid)
+            self.driver = FakeBoundDriver(pid)
+
+    monkeypatch.setattr(
+        "app.core.sender_windows_uia._SelectedWeChatUIA",
+        FakeDriverFactory,
+    )
+    monkeypatch.setattr(sender, "_binding_info", lambda: binding)
+
+    first = sender._get_driver()
+    assert sender._get_driver() is first
+
+    binding["selected_account"] = "wxid_account_b"
+    binding["bound_account"] = "wxid_account_b"
+    second = sender._get_driver()
+
+    assert second is not first
+    assert created == [5678, 5678]

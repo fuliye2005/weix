@@ -151,6 +151,7 @@ class WindowsUIASender:
         self._require_ui_verify = bool(win_cfg.get("require_ui_verify", True))
         self._ensure_full_layout = bool(win_cfg.get("ensure_full_layout", True))
         self._last_result: SendResult | None = None
+        self._driver_account = ""
         self._last_binding_error: dict[str, Any] | None = None
         self._last_navigation_error: dict[str, Any] | None = None
         self._last_background_capability: dict[str, Any] = {}
@@ -288,11 +289,20 @@ class WindowsUIASender:
         }
 
     def _get_driver(self):
-        target_pid = self._get_bound_pid()
+        binding = self._binding_info()
+        target_pid = binding.get("bound_pid") or self._get_bound_pid()
+        target_account = str(
+            binding.get("bound_account") or binding.get("selected_account") or ""
+        ).casefold()
         with self._driver_lock:
-            if self._driver is None or self._driver_pid != target_pid:
+            if (
+                self._driver is None
+                or self._driver_pid != target_pid
+                or self._driver_account != target_account
+            ):
                 self._driver = _SelectedWeChatUIA(target_pid).driver
                 self._driver_pid = target_pid
+                self._driver_account = target_account
             return self._driver
 
     def _is_running_sync(self) -> bool:
@@ -512,6 +522,7 @@ class WindowsUIASender:
         control: Any,
         text: str,
         allow_focus_fallback: bool = True,
+        prefer_focus_fallback: bool = False,
     ) -> bool:
         """Set an edit control through ValuePattern, optionally using focus."""
         if not allow_focus_fallback:
@@ -524,13 +535,14 @@ class WindowsUIASender:
             logger.debug("UIA LegacyIAccessiblePattern 写入失败，后台模式拒绝其他回退")
             return False
 
-        try:
-            value_pattern = control.GetValuePattern()
-            if value_pattern is not None and not value_pattern.IsReadOnly:
-                if value_pattern.SetValue(text, waitTime=0.1):
-                    return True
-        except Exception:
-            pass
+        if not prefer_focus_fallback:
+            try:
+                value_pattern = control.GetValuePattern()
+                if value_pattern is not None and not value_pattern.IsReadOnly:
+                    if value_pattern.SetValue(text, waitTime=0.1):
+                        return True
+            except Exception:
+                pass
 
         try:
             import uiautomation as auto
@@ -1073,12 +1085,23 @@ class WindowsUIASender:
 
             written = self._read_control_value(input_control)
             if self._normalize_text(written) != self._normalize_text(msg):
-                return result.fail(
-                    "draft",
-                    "draft_readback_mismatch",
-                    "输入框回读内容与待发送正文不一致",
-                    written=written,
+                retry_written = self._set_text_without_mouse(
+                    driver,
+                    input_control,
+                    msg,
+                    allow_focus_fallback=not background,
+                    prefer_focus_fallback=True,
                 )
+                if retry_written:
+                    written = self._read_control_value(input_control)
+                if self._normalize_text(written) != self._normalize_text(msg):
+                    return result.fail(
+                        "draft",
+                        "draft_readback_mismatch",
+                        "输入框回读内容与待发送正文不一致",
+                        written=written,
+                        retry_attempted=not background,
+                    )
 
             button = self._find_send_button(driver, input_control)
             invoke_method = ""
