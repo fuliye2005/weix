@@ -1103,6 +1103,27 @@ class WindowsUIASender:
                         retry_attempted=not background,
                     )
 
+            if not background:
+                try:
+                    has_focus = bool(getattr(input_control, "HasKeyboardFocus", False))
+                except Exception:
+                    has_focus = False
+                if not has_focus:
+                    try:
+                        if not input_control.SetFocus():
+                            return result.fail(
+                                "draft",
+                                "input_focus_failed",
+                                "正文已写入，但无法把聊天输入框设为键盘焦点",
+                            )
+                    except Exception as exc:
+                        return result.fail(
+                            "draft",
+                            "input_focus_failed",
+                            f"正文已写入，但无法把聊天输入框设为键盘焦点: {exc}",
+                        )
+                result.details["input_focused"] = True
+
             button = self._find_send_button(driver, input_control)
             invoke_method = ""
             if button is not None:

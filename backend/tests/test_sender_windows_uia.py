@@ -440,6 +440,40 @@ def test_uia_retries_text_after_readback_mismatch(monkeypatch):
     assert result.draft_cleared is True
 
 
+def test_foreground_uia_focuses_input_before_invoke(monkeypatch):
+    sender = WindowsUIASender()
+    sender._send_mode = "foreground_uia"
+    sender._send_key_fallback = "none"
+    sender._require_ui_verify = False
+    driver = FakeDriver()
+
+    monkeypatch.setattr(sender, "_ensure_driver_window", lambda _method=None: driver)
+    monkeypatch.setattr(
+        sender,
+        "_set_text_without_mouse",
+        lambda _driver, control, text, **_kwargs: control.value_pattern.__setattr__("value", text) or True,
+    )
+    monkeypatch.setattr(sender, "_find_send_button", lambda *_args: FakeSendButton())
+
+    def invoke(_control):
+        assert driver.input.focused is True
+        driver.input.value_pattern.value = ""
+        return True, "LegacyIAccessible.DoDefaultAction"
+
+    monkeypatch.setattr(sender, "_invoke_control", invoke)
+
+    result = sender._send_text_once(
+        "需要焦点",
+        "测试联系人",
+        False,
+        "wxid_target",
+        "foreground_uia",
+    )
+
+    assert result.success is True
+    assert result.details["input_focused"] is True
+
+
 def test_uia_rebuilds_driver_when_bound_account_changes(monkeypatch):
     sender = WindowsUIASender()
     binding = {
