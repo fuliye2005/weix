@@ -226,6 +226,8 @@ def test_background_text_write_prefers_legacy_value_pattern():
 
 def test_uia_diagnose_resolves_window_pid_without_sending(monkeypatch):
     sender = WindowsUIASender()
+    sender._send_mode = "foreground_uia"
+    sender._background_mode = False
     driver = FakeDiagnosticDriver()
     probe_methods = []
     monkeypatch.setattr(
