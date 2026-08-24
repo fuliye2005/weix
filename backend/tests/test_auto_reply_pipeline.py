@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 from datetime import datetime
@@ -60,12 +61,45 @@ class FakeStructuredSender(FakeSender):
         return result
 
 
+class FakePendingSender(FakeStructuredSender):
+    def __init__(self):
+        super().__init__()
+        self.verify_calls = 0
+
+    async def send_text_result(self, msg, receiver, **kwargs):
+        self.sent.append((msg, receiver, kwargs))
+        result = SendResult.for_message(
+            msg,
+            kwargs.get("target_id") or receiver,
+            "foreground_uia",
+            kwargs.get("attempt_id", ""),
+        )
+        result.action_performed = True
+        result.draft_cleared = True
+        result.ui_verified = True
+        result.pending(
+            "db_verify",
+            error_code="db_not_confirmed",
+            error_message="暂未确认",
+            db_verify_since_ts=1,
+            verification_target_id=kwargs.get("target_id"),
+        )
+        return result
+
+    async def verify_pending_result(self, result, msg, target_id="", **_kwargs):
+        self.verify_calls += 1
+        return result.sent("db_verify", db_verified=True, ui_verified=True)
+
+
 class FakeMonitor:
     def __init__(self):
         self.remembered = []
 
     def remember_sent_message(self, receiver, reply):
         self.remembered.append((receiver, reply))
+
+    async def stop(self):
+        pass
 
 
 class FakeAgent:
@@ -176,6 +210,45 @@ async def test_auto_reply_persists_outbound_lifecycle_and_reply_link(monkeypatch
     assert rows[0].attempt_id == sender.results[0].attempt_id
     assert rows[0].send_method == "foreground_uia"
 
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_pending_reply_verification_updates_log_without_resending(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "app.core.auto_reply_pipeline.get_config",
+        lambda: SimpleNamespace(auto_reply={"reply_mode": "keyword"}),
+    )
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'pending.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    sender = FakePendingSender()
+    pipeline = AutoReplyPipeline(session_factory=factory)
+    pipeline._sender = sender
+    pipeline._rule_engine = FakeRuleEngine()
+    pipeline._monitor = FakeMonitor()
+    pipeline._park_after_send = False
+    pipeline._debounce_seconds = 0
+    pipeline._name_map = {"wxid_friend": "朋友"}
+    pipeline._buffer["wxid_friend"] = [_private_msg(content="在吗")]
+
+    await pipeline._flush_buffer("wxid_friend")
+    await asyncio.sleep(0.05)
+
+    async with factory() as session:
+        row = (
+            await session.execute(
+                select(Message).where(Message.direction == "outbound")
+            )
+        ).scalar_one()
+
+    assert sender.sent.__len__() == 1
+    assert sender.verify_calls == 1
+    assert row.status == "sent"
+    await pipeline.stop()
     await engine.dispose()
 
 

@@ -59,6 +59,7 @@ class AutoReplyPipeline:
         # 消息防抖缓冲: sender_key -> [messages]
         self._buffer: dict[str, list] = {}
         self._buffer_timers: dict[str, asyncio.Task] = {}
+        self._pending_verification_tasks: set[asyncio.Task] = set()
         self._debounce_seconds = 20
         self._recent_chat_context: dict[str, list[str]] = {}
         self._recent_context_limit = 12
@@ -158,6 +159,11 @@ class AutoReplyPipeline:
             timer.cancel()
         self._buffer_timers.clear()
         self._buffer.clear()
+        for task in self._pending_verification_tasks:
+            task.cancel()
+        if self._pending_verification_tasks:
+            await asyncio.gather(*self._pending_verification_tasks, return_exceptions=True)
+        self._pending_verification_tasks.clear()
         if self._monitor:
             await self._monitor.stop()
         logger.info("自动回复流水线已停止")
@@ -626,6 +632,15 @@ class AutoReplyPipeline:
                     error_message=result.error_message,
                     sent_at=datetime.now() if result.status == "sent" else None,
                 )
+                if result.status == "pending_verify":
+                    self._schedule_pending_verification(
+                        content=reply_text,
+                        receiver=display_name,
+                        target_id=receiver,
+                        attempt_id=outbound.attempt_id,
+                        result=result,
+                        is_group=msg.is_group,
+                    )
 
             if result.success:
                 if self._monitor:
@@ -691,6 +706,89 @@ class AutoReplyPipeline:
                 "更新出站回复日志失败 | attempt_id=%s | error=%s",
                 attempt_id,
                 exc,
+            )
+
+    def _schedule_pending_verification(
+        self,
+        *,
+        content: str,
+        receiver: str,
+        target_id: str,
+        attempt_id: str,
+        result: SendResult,
+        is_group: bool,
+    ) -> None:
+        """Start database-only verification; never enter the send path again."""
+        verifier = getattr(self._sender, "verify_pending_result", None)
+        if not callable(verifier):
+            return
+        task = asyncio.create_task(
+            self._finish_pending_verification(
+                verifier=verifier,
+                content=content,
+                receiver=receiver,
+                target_id=target_id,
+                attempt_id=attempt_id,
+                result=result,
+                is_group=is_group,
+            )
+        )
+        self._pending_verification_tasks.add(task)
+        task.add_done_callback(self._pending_verification_tasks.discard)
+
+    async def _finish_pending_verification(
+        self,
+        *,
+        verifier,
+        content: str,
+        receiver: str,
+        target_id: str,
+        attempt_id: str,
+        result: SendResult,
+        is_group: bool,
+    ) -> None:
+        retries = 1
+        try:
+            sender_cfg = get_config().windows_sender
+            retries = max(1, int(sender_cfg.get("pending_verify_retries", 2)))
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+        final = result
+        for index in range(retries):
+            final = await verifier(
+                final,
+                content,
+                target_id=target_id,
+            )
+            if final.status != "pending_verify" or index + 1 >= retries:
+                break
+            await asyncio.sleep(1.0)
+
+        await self._update_outbound_reply_log(
+            attempt_id,
+            status=final.status,
+            send_method=final.method,
+            error_stage=final.stage,
+            error_code=final.error_code,
+            error_message=final.error_message,
+            sent_at=datetime.now() if final.status == "sent" else None,
+        )
+        if final.success:
+            if self._monitor:
+                self._monitor.remember_sent_message(target_id, content)
+            logger.info(
+                "待验证自动回复已由数据库确认 | receiver=%s | group=%s",
+                receiver,
+                is_group,
+            )
+            await self._park_after_reply()
+        else:
+            logger.warning(
+                "待验证自动回复仍未确认 | receiver=%s | target_id=%s | attempt_id=%s",
+                receiver,
+                target_id,
+                attempt_id,
             )
 
     def _sender_method(self) -> str:

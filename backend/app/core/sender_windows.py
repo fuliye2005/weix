@@ -311,6 +311,51 @@ class WindowsSender(BaseMessageSender):
         self._last_result = result
         return result
 
+    async def verify_pending_result(
+        self,
+        result: SendResult,
+        msg: str,
+        target_id: str = "",
+        timeout: float | None = None,
+    ) -> SendResult:
+        """Continue database-only verification for a prior send attempt.
+
+        This method never touches the UI.  It exists so callers can keep a
+        ``pending_verify`` log row alive while WeChat finishes writing the
+        message database, without re-entering the send path.
+        """
+        if result.status != "pending_verify":
+            return result
+        target_id = str(target_id or result.details.get("verification_target_id", ""))
+        since_ts = int(result.details.get("db_verify_since_ts") or result.started_at)
+        if not target_id:
+            return result.pending(
+                "db_verify",
+                error_code="target_id_required",
+                error_message="数据库验证必须提供目标会话 ID，已禁止跨会话匹配",
+                db_verified=False,
+            )
+
+        loop = asyncio.get_running_loop()
+        verified = await loop.run_in_executor(
+            _executor,
+            self._verify_sent_text,
+            msg,
+            since_ts,
+            target_id,
+            timeout,
+        )
+        result.db_verified = verified
+        if verified:
+            return result.sent("db_verify", db_verified=True, ui_verified=result.ui_verified)
+        return result.pending(
+            "db_verify",
+            error_code="db_not_confirmed",
+            error_message="发送动作已完成，但目标会话数据库仍未确认",
+            db_verified=False,
+            ui_verified=result.ui_verified,
+        )
+
     @property
     def last_result(self) -> SendResult | None:
         return self._last_result
@@ -892,12 +937,20 @@ class WindowsSender(BaseMessageSender):
 
     # --- 发送后校验 ---
 
-    def _verify_sent_text(self, msg: str, since_ts: int, target_id: str = "") -> bool:
+    def _verify_sent_text(
+        self,
+        msg: str,
+        since_ts: int,
+        target_id: str = "",
+        timeout: float | None = None,
+    ) -> bool:
         """发送后从本地消息库回读确认，避免 GUI 假阳性。"""
         if not self._verify_after_send:
             return True
 
-        deadline = time.monotonic() + self._verify_timeout
+        deadline = time.monotonic() + (
+            self._verify_timeout if timeout is None else max(0.0, float(timeout))
+        )
         while time.monotonic() <= deadline:
             try:
                 if self._find_recent_self_text(msg, since_ts, target_id):

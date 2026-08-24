@@ -342,3 +342,39 @@ def test_reader_has_recent_self_text_normalizes_group_prefix():
     assert WindowsSender._reader_has_recent_self_text(
         Reader(), "你好", 90, target_id="room@chatroom"
     ) is True
+
+
+@pytest.mark.asyncio
+async def test_verify_pending_result_only_reads_database(monkeypatch):
+    from app.core.send_result import SendResult
+    from app.core.sender_windows import WindowsSender
+
+    sender = _make_sender()
+    sender._verify_after_send = True
+    result = SendResult.for_message("你好", "wxid_target", "foreground_uia")
+    result.ui_verified = True
+    result.details["db_verify_since_ts"] = 100
+    result.details["verification_target_id"] = "wxid_target"
+    result.pending(
+        "db_verify",
+        error_code="db_not_confirmed",
+        error_message="暂未确认",
+    )
+    calls = []
+
+    def verify(*args):
+        calls.append(args)
+        return True
+
+    monkeypatch.setattr(sender, "_verify_sent_text", verify)
+
+    settled = await sender.verify_pending_result(
+        result,
+        "你好",
+        target_id="wxid_target",
+        timeout=0,
+    )
+
+    assert settled.status == "sent"
+    assert settled.db_verified is True
+    assert calls == [("你好", 100, "wxid_target", 0)]
