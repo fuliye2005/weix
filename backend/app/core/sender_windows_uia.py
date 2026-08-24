@@ -819,28 +819,48 @@ class WindowsUIASender:
     @staticmethod
     def _invoke_control(control: Any) -> tuple[bool, str]:
         """Invoke a control through UIA patterns without moving the mouse."""
-        try:
-            import uiautomation as auto
+        return WindowsUIASender._invoke_control_variant(control, background=False)
 
-            invoke_pattern = control.GetPattern(auto.PatternId.InvokePattern)
-            if invoke_pattern is not None and invoke_pattern.Invoke(waitTime=0.2):
-                return True, "InvokePattern"
-        except Exception:
-            pass
-        try:
-            legacy_pattern = control.GetLegacyIAccessiblePattern()
-            if legacy_pattern is not None and legacy_pattern.DoDefaultAction(waitTime=0.2):
-                return True, "LegacyIAccessible.DoDefaultAction"
-        except Exception:
-            pass
-        try:
-            import uiautomation as auto
+    @staticmethod
+    def _invoke_control_variant(
+        control: Any,
+        excluded: set[str] | None = None,
+        background: bool = False,
+    ) -> tuple[bool, str]:
+        """Try another exposed action after a reported-but-ineffective call.
 
-            selection_pattern = control.GetPattern(auto.PatternId.SelectionItemPattern)
-            if selection_pattern is not None and selection_pattern.Select(waitTime=0.2):
-                return True, "SelectionItemPattern"
-        except Exception:
-            pass
+        Some Weixin 4.x controls report ``InvokePattern.Invoke() == True``
+        without consuming the draft. The caller verifies the postcondition and
+        uses this helper to try a different pattern without replaying the
+        whole message send.
+        """
+        excluded = set(excluded or ())
+        ordered = (
+            ("InvokePattern", "SelectionItemPattern", "LegacyIAccessible.DoDefaultAction")
+            if background
+            else ("LegacyIAccessible.DoDefaultAction", "SelectionItemPattern", "InvokePattern")
+        )
+        for method in ordered:
+            if method in excluded:
+                continue
+            try:
+                if method == "LegacyIAccessible.DoDefaultAction":
+                    pattern = control.GetLegacyIAccessiblePattern()
+                    if pattern is not None and pattern.DoDefaultAction(waitTime=0.2):
+                        return True, method
+                    continue
+
+                import uiautomation as auto
+
+                pattern = control.GetPattern(getattr(auto.PatternId, method))
+                if pattern is None:
+                    continue
+                if method == "InvokePattern" and pattern.Invoke(waitTime=0.2):
+                    return True, method
+                if method == "SelectionItemPattern" and pattern.Select(waitTime=0.2):
+                    return True, method
+            except Exception as exc:
+                logger.debug("UIA 备用发送 Pattern 失败 | method=%s | error=%s", method, exc)
         return False, ""
 
     @staticmethod
@@ -1300,6 +1320,7 @@ class WindowsUIASender:
 
             button = self._find_send_button(driver, input_control)
             invoke_method = ""
+            invoke_attempts: list[str] = []
             if button is not None:
                 if background and self._background_post_message:
                     invoked, invoke_method = self._post_button_message_without_mouse(
@@ -1324,6 +1345,8 @@ class WindowsUIASender:
                         else "发送按钮存在但 Invoke/Legacy Pattern 调用失败",
                         patterns=self._pattern_summary(button),
                     )
+                if invoke_method:
+                    invoke_attempts.append(invoke_method)
                 result.action_performed = True
             else:
                 if self._send_key_fallback == "none":
@@ -1347,17 +1370,51 @@ class WindowsUIASender:
                     auto.SendKeys(keys, waitTime=0.1)
                 result.action_performed = True
                 invoke_method = f"key:{self._send_key_fallback}"
+                invoke_attempts.append(invoke_method)
 
             result.details["invoke_method"] = invoke_method
+            result.details["invoke_attempts"] = list(invoke_attempts)
             if background and not self._verify_background_state(
                 result, background_state or {}, "after_invoke"
             ):
                 return result
-            if not self._wait_input_empty(input_control):
+
+            # Pattern invocation is only an acknowledgement. Verify that the
+            # draft was consumed before considering the action successful. If
+            # a pattern returned True but did nothing, try the remaining
+            # exposed patterns without replaying the whole send operation.
+            draft_cleared = self._wait_input_empty(input_control)
+            attempted_patterns = set(invoke_attempts)
+            while (
+                not draft_cleared
+                and button is not None
+                and invoke_attempts
+                and not invoke_method.startswith("key:")
+            ):
+                invoked, alternate_method = self._invoke_control_variant(
+                    button,
+                    attempted_patterns,
+                    background=background,
+                )
+                if not invoked:
+                    break
+                attempted_patterns.add(alternate_method)
+                invoke_attempts.append(alternate_method)
+                result.action_performed = True
+                result.details["invoke_attempts"] = list(invoke_attempts)
+                result.details["invoke_method"] = " -> ".join(invoke_attempts)
+                if background and not self._verify_background_state(
+                    result, background_state or {}, "after_invoke"
+                ):
+                    return result
+                draft_cleared = self._wait_input_empty(input_control)
+
+            if not draft_cleared:
                 return result.fail(
                     "ui_verify",
                     "send_not_accepted",
                     "发送动作完成但输入框未清空，微信可能未接受发送",
+                    invoke_attempts=list(invoke_attempts),
                 )
             result.draft_cleared = True
 

@@ -64,6 +64,21 @@ class FakeSendButton:
         return self.legacy_pattern
 
 
+class FakeFallbackSendButton:
+    def __init__(self, input_control):
+        self.input_control = input_control
+
+    def GetLegacyIAccessiblePattern(self):
+        return self
+
+    def DoDefaultAction(self, waitTime=0.1):
+        self.input_control.value_pattern.value = ""
+        return True
+
+    def GetPattern(self, _pattern_id):
+        return None
+
+
 class FakeDriver:
     def __init__(self):
         self.input = FakeInput()
@@ -503,6 +518,42 @@ def test_uia_retries_text_after_readback_mismatch(monkeypatch):
     assert result.success is True
     assert calls == [False, True]
     assert result.draft_cleared is True
+
+
+def test_uia_retries_remaining_button_pattern_after_false_positive_invoke(monkeypatch):
+    sender = WindowsUIASender()
+    sender._send_mode = "foreground_uia"
+    sender._send_key_fallback = "none"
+    sender._require_ui_verify = False
+    sender._input_verify_timeout = 0.01
+    driver = FakeDriver()
+    button = FakeFallbackSendButton(driver.input)
+
+    monkeypatch.setattr(sender, "_ensure_driver_window", lambda _method=None: driver)
+    monkeypatch.setattr(sender, "_find_send_button", lambda *_args: button)
+    monkeypatch.setattr(
+        sender,
+        "_invoke_control",
+        lambda _control: (True, "InvokePattern"),
+    )
+
+    result = sender._send_text_once(
+        "第一次调用无效",
+        "测试联系人",
+        False,
+        "wxid_target",
+        "foreground_uia",
+    )
+
+    assert result.success is True
+    assert result.draft_cleared is True
+    assert result.details["invoke_attempts"] == [
+        "InvokePattern",
+        "LegacyIAccessible.DoDefaultAction",
+    ]
+    assert result.details["invoke_method"] == (
+        "InvokePattern -> LegacyIAccessible.DoDefaultAction"
+    )
 
 
 def test_foreground_uia_focuses_input_before_invoke(monkeypatch):
