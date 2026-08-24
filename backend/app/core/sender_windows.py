@@ -235,6 +235,7 @@ class WindowsSender(BaseMessageSender):
         is_group: bool = False,
         target_id: str = "",
         attempt_id: str = "",
+        wait_for_db_verify: bool = True,
     ) -> bool:
         """发送文本消息。
 
@@ -255,6 +256,7 @@ class WindowsSender(BaseMessageSender):
             is_group=is_group,
             target_id=target_id,
             attempt_id=attempt_id,
+            wait_for_db_verify=wait_for_db_verify,
         )
         return result.success
 
@@ -266,6 +268,7 @@ class WindowsSender(BaseMessageSender):
         is_group: bool = False,
         target_id: str = "",
         attempt_id: str = "",
+        wait_for_db_verify: bool = True,
     ) -> SendResult:
         """Send text and retain structured delivery diagnostics."""
         method = self._method if self._method in {"uia", "uia_only", "uia-first"} else "mouse"
@@ -282,9 +285,17 @@ class WindowsSender(BaseMessageSender):
                 is_group,
                 target_id,
                 attempt_id,
+                wait_for_db_verify,
             )
             uia_mode = str(getattr(self._uia_sender, "_send_mode", "") or "")
-            if result.success or not self._allow_mouse_fallback or uia_mode == "auto":
+            if (
+                result.success
+                or result.status == "pending_verify"
+                or result.action_performed
+                or result.draft_cleared
+                or not self._allow_mouse_fallback
+                or uia_mode == "auto"
+            ):
                 self._last_result = result
                 return result
             logger.warning("UIA 发送失败，按配置回退鼠标发送 | receiver=%s", receiver)
@@ -409,6 +420,7 @@ class WindowsSender(BaseMessageSender):
         is_group: bool,
         target_id: str,
         attempt_id: str = "",
+        wait_for_db_verify: bool = True,
     ) -> bool:
         result = await self._send_text_uia_result(
             msg,
@@ -416,6 +428,7 @@ class WindowsSender(BaseMessageSender):
             is_group,
             target_id,
             attempt_id,
+            wait_for_db_verify,
         )
         return result.success
 
@@ -426,6 +439,7 @@ class WindowsSender(BaseMessageSender):
         is_group: bool,
         target_id: str,
         attempt_id: str = "",
+        wait_for_db_verify: bool = True,
     ) -> SendResult:
         if self._uia_sender is None:
             from app.core.sender_windows_uia import WindowsUIASender
@@ -443,6 +457,15 @@ class WindowsSender(BaseMessageSender):
         result.details.setdefault("verification_target_id", str(target_id or ""))
         if not result.success or not self._verify_after_send:
             return result
+
+        if not wait_for_db_verify:
+            return result.pending(
+                "db_verify",
+                error_code="db_verification_deferred",
+                error_message="UIA 已完成发送，数据库验证已转入后台，不阻塞发送请求",
+                db_verified=False,
+                ui_verified=result.ui_verified,
+            )
 
         if not target_id:
             return result.pending(

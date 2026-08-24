@@ -179,9 +179,13 @@ async def send_message(
                     is_group=is_group,
                     target_id=target_id,
                     attempt_id=outbound.attempt_id,
+                    wait_for_db_verify=False,
                 )
             except TypeError as exc:
-                if not any(name in str(exc) for name in ("attempt_id", "force_skip")):
+                if not any(
+                    name in str(exc)
+                    for name in ("attempt_id", "force_skip", "wait_for_db_verify")
+                ):
                     raise
                 result = await structured(
                     req.msg,

@@ -830,11 +830,12 @@ class AutoReplyPipeline:
                         is_group=is_group,
                         target_id=target_id,
                         attempt_id=attempt_id,
+                        wait_for_db_verify=False,
                     )
                 except TypeError as exc:
                     if not any(
                         name in str(exc)
-                        for name in ("attempt_id", "force_skip")
+                        for name in ("attempt_id", "force_skip", "wait_for_db_verify")
                     ):
                         raise
                     return await send_result(

@@ -378,3 +378,81 @@ async def test_verify_pending_result_only_reads_database(monkeypatch):
     assert settled.status == "sent"
     assert settled.db_verified is True
     assert calls == [("你好", 100, "wxid_target", 0)]
+
+
+@pytest.mark.asyncio
+async def test_uia_deferred_database_verification_does_not_block_or_recheck_inline(
+    monkeypatch,
+):
+    from app.core.send_result import SendResult
+    from app.core.sender_windows import WindowsSender
+
+    sender = _make_sender()
+    sender._verify_after_send = True
+    sent = SendResult.for_message("你好", "wxid_target", "foreground_uia")
+    sent.action_performed = True
+    sent.draft_cleared = True
+    sent.ui_verified = True
+    sent.sent("ui_verify", action_performed=True, draft_cleared=True, ui_verified=True)
+
+    async def fake_uia(*_args, **_kwargs):
+        return sent
+
+    sender._uia_sender = type("FakeUIASender", (), {"send_text_result": fake_uia})()
+    monkeypatch.setattr(
+        sender,
+        "_verify_sent_text",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("deferred verification must not query inline")
+        ),
+    )
+
+    result = await sender._send_text_uia_result(
+        "你好",
+        "测试联系人",
+        False,
+        "wxid_target",
+        wait_for_db_verify=False,
+    )
+
+    assert result.status == "pending_verify"
+    assert result.error_code == "db_verification_deferred"
+    assert result.action_performed is True
+    assert result.ui_verified is True
+
+
+@pytest.mark.asyncio
+async def test_pending_uia_result_never_falls_back_to_mouse(monkeypatch):
+    from app.core.send_result import SendResult
+    from app.core.sender_windows import WindowsSender
+
+    sender = _make_sender()
+    sender._method = "uia"
+    sender._allow_mouse_fallback = True
+    pending = SendResult.for_message("你好", "wxid_target", "foreground_uia")
+    pending.action_performed = True
+    pending.draft_cleared = True
+    pending.pending(
+        "db_verify",
+        error_code="db_verification_deferred",
+        error_message="后台验证",
+    )
+
+    async def fake_uia_result(*_args, **_kwargs):
+        return pending
+
+    monkeypatch.setattr(sender, "_send_text_uia_result", fake_uia_result)
+
+    async def unexpected_mouse(*_args, **_kwargs):
+        raise AssertionError("pending UIA result must not enter mouse fallback")
+
+    monkeypatch.setattr(sender, "_send_text_mouse_result", unexpected_mouse)
+
+    result = await sender.send_text_result(
+        "你好",
+        "测试联系人",
+        target_id="wxid_target",
+        wait_for_db_verify=False,
+    )
+
+    assert result is pending
