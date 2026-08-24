@@ -1182,7 +1182,10 @@ class WindowsUIASender:
         if self._send_mode == "auto":
             capability = self._probe_background_capability()
             if capability.get("available"):
-                return ["background_uia"]
+                methods = ["background_uia"]
+                if self._allow_foreground_activation:
+                    methods.append("foreground_uia")
+                return methods
             if self._allow_foreground_activation:
                 logger.info(
                     "后台 UIA 能力不足，按显式配置选择前台 UIA | code=%s | reason=%s",
@@ -1484,6 +1487,7 @@ class WindowsUIASender:
                 and button is not None
                 and invoke_attempts
                 and not invoke_method.startswith("key:")
+                and invoke_method != "PostMessage:WM_LBUTTON"
             ):
                 invoked, alternate_method = self._invoke_control_variant(
                     button,
@@ -1502,6 +1506,54 @@ class WindowsUIASender:
                 ):
                     return result
                 draft_cleared = self._wait_input_empty(input_control)
+
+            # Some Weixin 4.x builds acknowledge every exposed Pattern but do
+            # not consume the draft. Before trying another delivery action,
+            # check whether the message already appeared in the UI; clicking
+            # again in that ambiguous state could create a duplicate.
+            if (
+                not draft_cleared
+                and button is not None
+                and self._ui_contains_sent_text(driver, msg)
+            ):
+                result.ui_verified = True
+                return result.fail(
+                    "ui_verify",
+                    "send_state_ambiguous",
+                    "消息列表已出现正文，但输入框未清空，已禁止再次发送",
+                    invoke_attempts=list(invoke_attempts),
+                )
+
+            # The tested custom Qt button exposes a reliable UIA rectangle but
+            # its Invoke/Legacy actions can be false positives. Posting the
+            # button's own mouse messages to the UIA-bound main window keeps
+            # the physical cursor and keyboard focus untouched. This is also
+            # the final no-input fallback for foreground UIA.
+            if (
+                not draft_cleared
+                and button is not None
+                and self._background_post_message
+                and not invoke_method.startswith("key:")
+                and invoke_method != "PostMessage:WM_LBUTTON"
+            ):
+                if background and not self._verify_background_state(
+                    result, background_state or {}, "before_post_message"
+                ):
+                    return result
+                posted, posted_method = self._post_button_message_without_mouse(
+                    driver,
+                    button,
+                )
+                if posted:
+                    invoke_attempts.append(posted_method)
+                    result.action_performed = True
+                    result.details["invoke_attempts"] = list(invoke_attempts)
+                    result.details["invoke_method"] = " -> ".join(invoke_attempts)
+                    if background and not self._verify_background_state(
+                        result, background_state or {}, "after_post_message"
+                    ):
+                        return result
+                    draft_cleared = self._wait_input_empty(input_control)
 
             if not draft_cleared:
                 return result.fail(
@@ -1685,6 +1737,12 @@ class WindowsUIASender:
                 return result
             last_result = result
             if self._send_mode != "auto":
+                break
+            if result.error_code == "background_input_state_changed":
+                logger.error(
+                    "后台 UIA 已改变全局输入状态，禁止切换模式继续发送 | stage=%s",
+                    result.stage,
+                )
                 break
             if result.action_performed or result.draft_cleared:
                 logger.error(

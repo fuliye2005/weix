@@ -109,7 +109,37 @@ def test_windows_runtime_check_reports_pinned_environment(monkeypatch):
     result = windows_runtime.inspect_windows_runtime()
 
     assert result["ok"] is True
+    assert result["python_bits"] == 64
     assert result["packages"]["wechatauto-replica"] == "1.1.7"
+
+
+def test_windows_runtime_rejects_32_bit_python(monkeypatch):
+    from app.core import windows_runtime
+
+    monkeypatch.setattr(windows_runtime.sys, "platform", "win32")
+    monkeypatch.setattr(windows_runtime.sys, "version_info", (3, 12, 13))
+    monkeypatch.setattr(windows_runtime.struct, "calcsize", lambda _format: 4)
+    monkeypatch.setattr(windows_runtime, "_site_package_paths", lambda: [])
+    monkeypatch.setattr(
+        windows_runtime.importlib.metadata,
+        "version",
+        lambda package: windows_runtime.EXPECTED_PACKAGES[package],
+    )
+    monkeypatch.setattr(
+        windows_runtime,
+        "_module_path",
+        lambda module: str(
+            windows_runtime.Path(windows_runtime.sys.prefix)
+            / "Lib"
+            / "site-packages"
+            / f"{module}.py"
+        ),
+    )
+
+    result = windows_runtime.inspect_windows_runtime()
+
+    assert result["ok"] is False
+    assert any("64 位 Python" in error for error in result["errors"])
 
 
 def test_windows_runtime_rejects_wrong_python_version(monkeypatch):

@@ -89,14 +89,14 @@ cp .env.example .env
 
 然后编辑这两个文件，填入你的 API Key 等信息。
 
-Windows UIA 发送建议使用后台 UIA 配置：
+Windows UIA 发送建议使用自动 UIA 配置：优先后台发送，条件不足时使用前台 UIA：
 
 ```yaml
 windows_sender:
   method: uia
-  send_mode: background_uia
-  background_mode: true
-  allow_foreground_activation: false
+  send_mode: auto
+  background_mode: false
+  allow_foreground_activation: true
   background_post_message: true
   ensure_full_layout: true
   allow_mouse_fallback: false
@@ -107,10 +107,10 @@ windows_sender:
   park_after_send: false
 ```
 
-`background_uia` 使用已经 materialized 的 UIA 控件树定位发送按钮，再投递 `WM_LBUTTON` 窗口消息；不会前置微信窗口、
-移动鼠标或抢键盘。发送时必须先通过所选账号的 PID 绑定校验，再写入输入框并调用发送按钮。若目标会话或控件树不可访问，
-会记录明确错误码并失败，不会偷偷回退到键盘或鼠标。`foreground_uia` 仍可用于诊断或需要恢复 UI 布局的场景，但当前微信版本的
-`InvokePattern` 可能返回调用成功而不真正发送，因此不能单独作为成功依据。
+`auto` 会先检查后台 UIA 能力，优先使用已经 materialized 的控件树定位发送按钮，再投递 `WM_LBUTTON` 窗口消息；后台路径不会前置微信窗口、
+移动鼠标或抢键盘。如果目标会话不在可见会话列表、后台 Pattern 不完整或能力检查失败，且 `allow_foreground_activation: true`，则改用前台 UIA；
+前台路径只允许短暂激活窗口，不使用坐标点击。两条 UIA 路径都必须先通过所选账号的 PID 绑定校验，并且禁止自动回退到鼠标或键盘。
+当前微信版本的 `InvokePattern` 可能返回调用成功而不真正发送，因此不能单独作为成功依据。
 
 发送结果分为三层确认：
 

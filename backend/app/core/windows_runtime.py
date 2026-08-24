@@ -13,6 +13,7 @@ import importlib.metadata
 import logging
 import re
 import site
+import struct
 import sys
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,7 @@ def inspect_windows_runtime() -> dict[str, Any]:
     result: dict[str, Any] = {
         "platform": sys.platform,
         "python": sys.version,
+        "python_bits": struct.calcsize("P") * 8,
         "python_executable": str(Path(sys.executable).resolve()),
         "python_prefix": str(Path(sys.prefix).resolve()),
         "site_packages": [str(path) for path in _site_package_paths()],
@@ -86,6 +88,10 @@ def inspect_windows_runtime() -> dict[str, Any]:
     if sys.version_info[:2] != (3, 12):
         result["errors"].append(
             f"需要 Python 3.12 x64，当前为 {sys.version_info[0]}.{sys.version_info[1]}"
+        )
+    if result["python_bits"] != 64:
+        result["errors"].append(
+            f"需要 64 位 Python，当前为 {result['python_bits']} 位"
         )
 
     for package, expected in EXPECTED_PACKAGES.items():
@@ -133,8 +139,9 @@ def assert_windows_runtime() -> dict[str, Any]:
     """Log the runtime and raise a clear error when UIA is unsafe to use."""
     result = inspect_windows_runtime()
     logger.info(
-        "Windows UIA 运行环境 | python=%s | executable=%s | site_packages=%s | packages=%s | modules=%s",
+        "Windows UIA 运行环境 | python=%s | bits=%s | executable=%s | site_packages=%s | packages=%s | modules=%s",
         result["python"].splitlines()[0],
+        result["python_bits"],
         result["python_executable"],
         result["site_packages"],
         result["packages"],

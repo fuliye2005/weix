@@ -227,6 +227,37 @@ async def test_background_uia_uses_posted_button_message_without_input_injection
     assert driver.input.focused is False
 
 
+def test_foreground_uia_uses_posted_button_after_false_positive_pattern(monkeypatch):
+    sender = WindowsUIASender()
+    sender._send_mode = "foreground_uia"
+    sender._background_mode = False
+    sender._background_post_message = True
+    sender._require_ui_verify = False
+    sender._input_verify_timeout = 0.01
+    driver = FakeDriver()
+    monkeypatch.setattr(sender, "_get_driver", lambda: driver)
+    monkeypatch.setattr(sender, "_ensure_driver_window", lambda _method=None: driver)
+    monkeypatch.setattr(sender, "_find_send_button", lambda *_args: FakeSendButton())
+
+    def post_button(_driver, _button):
+        driver.input.value_pattern.value = ""
+        return True, "PostMessage:WM_LBUTTON"
+
+    monkeypatch.setattr(sender, "_post_button_message_without_mouse", post_button)
+
+    result = sender._send_text_sync_result(
+        "前台无坐标发送",
+        "测试联系人",
+        False,
+        "wxid_target",
+    )
+
+    assert result.success is True
+    assert result.method == "foreground_uia"
+    assert result.details["invoke_attempts"][-1] == "PostMessage:WM_LBUTTON"
+    assert driver.input.focused is True
+
+
 @pytest.mark.asyncio
 async def test_background_uia_does_not_call_ensure_window(monkeypatch):
     sender = WindowsUIASender()
@@ -448,6 +479,15 @@ def test_auto_selects_foreground_when_background_probe_is_incomplete(monkeypatch
     assert sender._candidate_methods() == ["foreground_uia"]
 
 
+def test_auto_keeps_foreground_fallback_when_background_probe_is_available(monkeypatch):
+    sender = WindowsUIASender()
+    sender._send_mode = "auto"
+    sender._allow_foreground_activation = True
+    monkeypatch.setattr(sender, "_probe_background_capability", lambda: {"available": True})
+
+    assert sender._candidate_methods() == ["background_uia", "foreground_uia"]
+
+
 def test_auto_stops_when_background_probe_is_incomplete_and_foreground_is_disabled(monkeypatch):
     sender = WindowsUIASender()
     sender._send_mode = "auto"
@@ -475,6 +515,35 @@ def test_auto_does_not_retry_after_send_action(monkeypatch):
         return attempted
 
     monkeypatch.setattr(sender, "_candidate_methods", lambda: ["background_uia", "foreground_uia"])
+    monkeypatch.setattr(sender, "_send_text_once", send_once)
+
+    result = sender._send_text_sync_result("你好", "目标", False, "wxid_target")
+
+    assert result is attempted
+    assert calls == [True]
+
+
+def test_auto_does_not_fallback_after_background_input_state_changed(monkeypatch):
+    sender = WindowsUIASender()
+    sender._send_mode = "auto"
+    calls = []
+
+    attempted = SendResult.for_message("你好", "wxid_target", "background_uia")
+    attempted.fail(
+        "invoke",
+        "background_input_state_changed",
+        "前台状态变化",
+    )
+
+    def send_once(*_args):
+        calls.append(True)
+        return attempted
+
+    monkeypatch.setattr(
+        sender,
+        "_candidate_methods",
+        lambda: ["background_uia", "foreground_uia"],
+    )
     monkeypatch.setattr(sender, "_send_text_once", send_once)
 
     result = sender._send_text_sync_result("你好", "目标", False, "wxid_target")

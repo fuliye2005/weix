@@ -18,7 +18,7 @@
 
 UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可以被热激活，发送流程已经接入 UIA 同步执行入口，会返回分阶段结果；发送后支持 UI、数据库和 pending 查库确认。真实机器上的只读 UIA、搜索切换和正文回读已经验证。
 
-前台 UIA 的按钮 Pattern 在当前微信版本上会返回调用成功但不清空草稿，不能作为主路径。后台 `InvokePattern` 会把窗口切到前台，已被保护逻辑拦截；后台 `LegacyIAccessible.DoDefaultAction` 不抢前台但不发送。最终实机验证确认 `background_uia + PostMessage:WM_LBUTTON` 可以发送：草稿清空、数据库产生本人消息、前台窗口/键盘焦点/鼠标坐标保持不变。数据库时间戳偶尔早于发送调用返回约 1 秒，已增加 3 秒回读容错。
+前台 UIA 的按钮 Pattern 在当前微信版本上会返回调用成功但不清空草稿；后台 `InvokePattern` 会把窗口切到前台，已被保护逻辑拦截；后台 `LegacyIAccessible.DoDefaultAction` 不抢前台但不发送。当前 `auto` 路径优先尝试 `background_uia + PostMessage:WM_LBUTTON`，能力不足或目标不可见时可按配置切换 `foreground_uia`；如果后台动作改变前台输入状态，则立即熔断，不再切换路径重发。后台实机验证确认 PostMessage 可以发送：草稿清空、数据库产生本人消息、前台窗口/键盘焦点/鼠标坐标保持不变。数据库时间戳偶尔早于发送调用返回约 1 秒，已增加 3 秒回读容错。
 
 管理界面现在可以执行只读 UIA 检测，返回选中账号、绑定 PID、窗口句柄、当前会话、搜索框、聊天输入框和发送按钮的 Pattern 信息。检测不会发送消息，也不会主动移动鼠标。
 
@@ -32,8 +32,9 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 - [x] 确认项目当前使用 `uiautomation 2.0.29`。
 - [x] 确认 UIA accessibility gate 可以热激活。
 - [x] 确认当前配置为 `method: uia`。
-- [x] 确认当前默认配置为 `background_mode: true`，后台模式不会主动激活微信窗口。
+- [x] 确认当前默认配置为 `send_mode: auto`，优先后台 UIA，条件不足时按配置切换前台 UIA。
 - [x] 确认当前配置为 `allow_mouse_fallback: false`。
+- [x] 确认 UIA 运行时要求 Python 3.12 x64，并拒绝 32 位 Python。
 - [x] 确认 `sender_windows_uia.py` 中已经存在 `_find_send_button()`。
 - [x] 确认当前前台 UIA 路径不再默认使用 `SendKeys("{Enter}")`，按键仅作为显式配置的兜底。
 - [x] 确认群聊数据库记录包含 `real_sender_id` 字段，并已接入 `Name2Id.rowid -> user_name` 映射。
@@ -56,6 +57,8 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 - [x] 管理界面提供后端重启按钮，账号切换后可以重新绑定数据库、监听器和微信窗口。
 - [x] 启动脚本改为固定使用 `venv\Scripts\python.exe`，并在启动前检查 UIA 依赖是否来自同一环境。
 - [x] 从外部 Python 3.13 的 `_pth` 中移除 `venv-py313-stale` 路径。
+- [x] `auto` 在后台能力可用时保留前台 UIA 候选，但仅在没有执行发送动作且没有触发输入状态变化时允许切换。
+- [x] 前台 Pattern 假成功时尝试 UIA 发现的按钮 `PostMessage:WM_LBUTTON`，不移动真实鼠标。
 
 ## 尚未完成
 
@@ -105,8 +108,8 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 通过 ValuePattern 写入并回读正文，再查找真正的发送按钮，优先调用 `InvokePattern`，其次调用
 `LegacyIAccessible.DoDefaultAction`。只有显式配置 `send_key_fallback: enter` 或 `ctrl_enter` 才会使用按键兜底，默认关闭。
 
-`background_uia` 不主动激活窗口，只接受已经 materialized 的 UIA 控件树；目标会话不在可见会话列表或控件树不可用时直接返回错误，
-不会自动降级到前台、坐标点击或鼠标发送。
+`background_uia` 不主动激活窗口，只接受已经 materialized 的 UIA 控件树；目标会话不在可见会话列表或控件树不可用时返回明确错误。
+`auto` 模式可在尚未执行发送动作时切换到 `foreground_uia`，但不会回退到坐标点击、鼠标发送或键盘注入。
 
 真实后台测试结果：
 
@@ -137,19 +140,19 @@ UIA Pattern 调用成功不等于消息已经落盘。系统先记录 `invoke` �
 - 已安装 `pytest 9.1.1` 到当前 `venv`。
 - 群聊解析专项测试：通过，`4 passed`。
 - 消息日志迁移测试：通过，`1 passed`，重复执行迁移也通过。
-- Windows 发送器与 UIA 单元测试：通过，`16 passed`。
+- Windows 发送器与 UIA 单元测试：通过，最新专项 `27 passed`。
 - 自动回复出站日志集成测试：通过，`8 passed`，验证 `generated -> sending -> sent`、`attempt_id` 和 `reply_to_msg_id`。
 - 消息 API/手动发送日志测试：通过，`11 passed`。
 - 前端 `npm run build`：通过；Vite 仅报告已有的大 chunk 警告。
 - UIA 诊断、PID 解析和平台接口定向测试：通过，`6 passed`。
 - UIA 检测界面前端构建：通过；Vite 仅报告已有的大 chunk 警告。
 - Windows 数据目录、临时清理和截图测试已完成隔离修复，不再依赖宿主机真实微信目录或污染后续测试。
-- 后端全量测试：`154 passed, 4 skipped`；4 个跳过项是默认关闭的真实微信集成测试，设置 `WEIX_RUN_LIVE_WECHAT_TESTS=1` 才会运行。
+- 后端全量测试：`168 passed, 4 skipped`；4 个跳过项是默认关闭的真实微信集成测试，设置 `WEIX_RUN_LIVE_WECHAT_TESTS=1` 才会运行。
 - Windows 真实机器只读验证：数据库诊断 `result: ok`（210 条消息、177 条文本消息）；UIA 绑定账号/PID/窗口 PID 一致；最大化后搜索框和会话列表可见；通过 UIA 打开“文件传输助手”成功；ValuePattern 草稿写入、回读、清空成功。
 - Windows 真实发送隔离验证：前台 UIA 测试 `Weix UIA 焦点修复测试 2026-08-24 21:06:19` 返回 `send_not_accepted`；后台 `InvokePattern` 测试 `Weix 后台 UIA 静默发送测试 2026-08-24 21:19:56` 返回 `background_input_state_changed`；后台 Legacy 测试 `Weix Legacy 后台 UIA 测试 2026-08-24 21:26:38` 未抢前台但未发送。ValuePattern 对照实验写入成功但会前置窗口。
 - UIA 真实后台发送和数据库回读闭环：已完成测试账号私聊验收；验证结果曾因数据库时间戳早于发送开始时间约 1 秒而误报，现已加入 3 秒容错。
 - 出站消息日志合并专项测试：通过，验证真实 `Msg_*` ID 回写、旧 inbound 重复行清理和无尝试时的出站兜底。
-- 消息日志和多账号状态改造后的全量回归：`154 passed, 4 skipped`；前端 `npm run build` 通过，Vite 仅报告已有的大 chunk 警告。
+- 消息日志和多账号状态改造后的全量回归：`168 passed, 4 skipped`；前端 `npm run build` 通过，Vite 仅报告已有的大 chunk 警告。
 
 ## 最近提交
 
