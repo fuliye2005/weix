@@ -157,7 +157,7 @@ async def test_uia_sender_writes_text_without_click(monkeypatch):
     monkeypatch.setattr(sender, "_find_send_button", lambda *_args: FakeSendButton())
     monkeypatch.setattr(
         sender,
-        "_invoke_control",
+        "_invoke_background_control",
         lambda _control: driver.input.value_pattern.__setattr__("value", "")
         or (True, "InvokePattern"),
     )
@@ -213,7 +213,7 @@ async def test_background_uia_does_not_call_ensure_window(monkeypatch):
     )
     monkeypatch.setattr(
         sender,
-        "_invoke_control",
+        "_invoke_background_control",
         lambda _control: driver.input.value_pattern.__setattr__("value", "")
         or (True, "InvokePattern"),
     )

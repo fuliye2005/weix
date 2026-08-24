@@ -841,6 +841,25 @@ class WindowsUIASender:
         return False, ""
 
     @staticmethod
+    def _invoke_background_control(control: Any) -> tuple[bool, str]:
+        """Prefer the legacy action for background UIA before InvokePattern."""
+        try:
+            legacy_pattern = control.GetLegacyIAccessiblePattern()
+            if legacy_pattern is not None and legacy_pattern.DoDefaultAction(waitTime=0.2):
+                return True, "LegacyIAccessible.DoDefaultAction"
+        except Exception:
+            pass
+        try:
+            import uiautomation as auto
+
+            invoke_pattern = control.GetPattern(auto.PatternId.InvokePattern)
+            if invoke_pattern is not None and invoke_pattern.Invoke(waitTime=0.2):
+                return True, "InvokePattern"
+        except Exception:
+            pass
+        return False, ""
+
+    @staticmethod
     def _post_enter_without_focus(driver: Any) -> bool:
         """Post an Enter key sequence to the WeChat window without activating it."""
         try:
@@ -1215,7 +1234,12 @@ class WindowsUIASender:
             button = self._find_send_button(driver, input_control)
             invoke_method = ""
             if button is not None:
-                invoked, invoke_method = self._invoke_control(button)
+                invoke = (
+                    self._invoke_background_control
+                    if background
+                    else self._invoke_control
+                )
+                invoked, invoke_method = invoke(button)
                 if not invoked:
                     return result.fail(
                         "invoke",
