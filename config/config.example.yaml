@@ -63,9 +63,15 @@ macos_sender:
 
 windows_sender:
   method: uia
-  # uia 后台发送：不激活微信、不聚焦控件、不发送键盘事件
-  background_mode: true
+  # 生产主路径：短暂激活微信，但不移动鼠标、不使用坐标点击
+  send_mode: foreground_uia
+  background_mode: false
   allow_mouse_fallback: false
+  # 只有显式设置 enter/ctrl_enter 才允许按键兜底，默认只调用真实发送按钮 Pattern
+  send_key_fallback: none
+  require_ui_verify: true
+  input_verify_timeout: 3.0
+  ui_verify_timeout: 4.0
   click_x_ratio: 0.5
   click_y_ratio: 0.88
   park_after_send: false

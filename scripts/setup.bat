@@ -5,8 +5,7 @@ REM ============================================================
 setlocal enabledelayedexpansion
 
 for %%I in ("%~dp0..") do set "PROJECT_DIR=%%~fI"
-set "PYTHON_EXE=%PROJECT_DIR%\..\python313\python.exe"
-if not exist "%PYTHON_EXE%" set "PYTHON_EXE=%PROJECT_DIR%\venv\Scripts\python.exe"
+set "PYTHON_EXE=%PROJECT_DIR%\venv\Scripts\python.exe"
 
 echo ============================================================
 echo  Weix - Windows 环境初始化
@@ -21,30 +20,27 @@ if %ERRORLEVEL% NEQ 0 (
     echo.
 )
 
-REM 检查 Python
-echo [检查] Python 环境...
+REM 检查/创建 Python 3.12 虚拟环境
+echo [检查] Python 3.12 环境...
 if not exist "%PYTHON_EXE%" (
-    where python >nul 2>nul
-    if %ERRORLEVEL% EQU 0 set "PYTHON_EXE=python"
-)
-if not exist "%PYTHON_EXE%" if /I not "%PYTHON_EXE%"=="python" (
-    echo [错误] 未找到 Python，请安装 Python 3.10+
-    echo        https://www.python.org/downloads/
-    pause
-    exit /b 1
+    py -3.12 --version >nul 2>nul
+    if errorlevel 1 (
+        echo [错误] 未找到 Python 3.12，请先安装 Python 3.12 x64
+        echo        https://www.python.org/downloads/
+        pause
+        exit /b 1
+    )
+    echo [创建] Python 3.12 虚拟环境...
+    py -3.12 -m venv "%PROJECT_DIR%\venv"
+    if errorlevel 1 (
+        echo [错误] 创建 Python 3.12 虚拟环境失败
+        pause
+        exit /b 1
+    )
 )
 
 for /f "tokens=2" %%v in ('"%PYTHON_EXE%" --version 2^>^&1') do set PYVER=%%v
 echo [信息] Python %PYVER%
-
-REM 创建虚拟环境
-if not exist "%PYTHON_EXE%" if not exist "venv" (
-    echo.
-    echo [创建] Python 虚拟环境...
-    "%PYTHON_EXE%" -m venv venv
-    set "PYTHON_EXE=%PROJECT_DIR%\venv\Scripts\python.exe"
-    echo [完成] Python 虚拟环境已创建
-)
 
 "%PYTHON_EXE%" -m pip install --upgrade pip -q
 
@@ -118,7 +114,7 @@ echo    2. 编辑 config\config.yaml 调整业务配置
 echo    3. 以管理员权限运行 scripts\start.bat
 echo.
 echo  Windows 注意事项:
-echo    - 发送方式: pyautogui 模拟键盘鼠标，无需额外安装
+echo    - 发送方式: foreground_uia，不移动鼠标、不使用坐标点击
 echo    - 密钥提取需管理员权限（读微信进程内存）
 echo    - 发送消息时微信窗口需保持前台，不要遮挡
 echo    - 关闭微信自动更新，避免 UI 变化导致坐标偏移

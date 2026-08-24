@@ -19,6 +19,7 @@ from ctypes import wintypes
 from typing import Any
 
 from app.config import get_config
+from app.core.send_result import SendResult
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,24 @@ class WindowsUIASender:
         self._driver_pid: int | None = None
         self._driver_lock = threading.Lock()
         win_cfg = get_config().windows_sender if hasattr(get_config(), "windows_sender") else {}
-        self._background_mode = bool(win_cfg.get("background_mode", True))
+        configured_mode = str(win_cfg.get("send_mode", "") or "").strip().lower()
+        if configured_mode not in {"foreground_uia", "background_uia", "auto"}:
+            configured_mode = (
+                "background_uia"
+                if bool(win_cfg.get("background_mode", False))
+                else "foreground_uia"
+            )
+        self._send_mode = configured_mode
+        self._background_mode = configured_mode == "background_uia"
+        self._send_key_fallback = str(
+            win_cfg.get("send_key_fallback", "none") or "none"
+        ).strip().lower()
+        if self._send_key_fallback not in {"none", "enter", "ctrl_enter"}:
+            self._send_key_fallback = "none"
+        self._input_verify_timeout = float(win_cfg.get("input_verify_timeout", 3.0))
+        self._ui_verify_timeout = float(win_cfg.get("ui_verify_timeout", 4.0))
+        self._require_ui_verify = bool(win_cfg.get("require_ui_verify", True))
+        self._last_result: SendResult | None = None
 
     async def send_text(
         self,
@@ -97,17 +115,43 @@ class WindowsUIASender:
         is_group: bool = False,
         target_id: str = "",
     ) -> bool:
+        result = await self.send_text_result(msg, receiver, is_group, target_id)
+        return result.success
+
+    async def send_text_result(
+        self,
+        msg: str,
+        receiver: str,
+        is_group: bool = False,
+        target_id: str = "",
+    ) -> SendResult:
+        """Send text and retain stage-level UIA diagnostics."""
+        method = self._send_mode
+        result = SendResult.for_message(msg, target_id or receiver, method)
         if not msg or not receiver:
-            return False
+            result.fail("draft", "invalid_request", "消息内容或接收者为空")
+            self._last_result = result
+            return result
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
+        result = await loop.run_in_executor(
             _UIA_EXECUTOR,
-            self._send_text_sync,
+            self._send_text_sync_result,
             msg,
             receiver,
             is_group,
             target_id,
         )
+        self._last_result = result
+        return result
+
+    @property
+    def last_result(self) -> SendResult | None:
+        return self._last_result
+
+    async def diagnose(self) -> dict[str, Any]:
+        """Probe the selected account and UIA controls without sending."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_UIA_EXECUTOR, self._diagnose_sync)
 
     async def is_wechat_running(self) -> bool:
         loop = asyncio.get_running_loop()
@@ -151,9 +195,10 @@ class WindowsUIASender:
             logger.debug("UIA 检查微信进程失败: %s", exc)
             return False
 
-    def _ensure_driver_window(self):
+    def _ensure_driver_window(self, method: str | None = None):
         driver = self._get_driver()
-        if self._background_mode:
+        background = method == "background_uia" if method else self._background_mode
+        if background:
             # wechatauto.ensure_window() deliberately activates the window. In
             # background mode, only bind to an already materialized UIA tree.
             window = driver._find_main()
@@ -230,8 +275,10 @@ class WindowsUIASender:
         driver: Any,
         keyword: str,
         is_group: bool,
+        background_mode: bool | None = None,
     ) -> bool:
-        if self._background_mode:
+        background = self._background_mode if background_mode is None else background_mode
+        if background:
             return self._open_visible_session_without_mouse(driver, keyword)
 
         search_box = driver._search_box(driver._win)
@@ -249,7 +296,7 @@ class WindowsUIASender:
                 driver,
                 search_box,
                 candidate,
-                allow_focus_fallback=not self._background_mode,
+                allow_focus_fallback=not background,
             ):
                 continue
             time.sleep(0.8)
@@ -275,6 +322,13 @@ class WindowsUIASender:
             return False
 
         exact = [item for item in results if item.get("name") == used_keyword]
+        if len(exact) > 1 or (len(results) > 1 and not exact):
+            logger.error(
+                "UIA 搜索结果不唯一 | keyword=%s | count=%s",
+                used_keyword,
+                len(results),
+            )
+            return False
         chosen = (exact or results)[0]
         if not self._invoke_without_mouse(chosen["cell"]):
             return False
@@ -344,19 +398,48 @@ class WindowsUIASender:
             if container is None:
                 break
             try:
-                button = container.ButtonControl(Name="发送")
-                if button.Exists(0.2, 0.1):
-                    return button
+                for name in ("发送", "发送(S)", "Send"):
+                    button = container.ButtonControl(Name=name)
+                    if button.Exists(0.2, 0.1):
+                        return button
             except Exception:
                 continue
 
         try:
-            button = driver._win.ButtonControl(Name="发送")
-            if button.Exists(0.2, 0.1):
-                return button
+            for name in ("发送", "发送(S)", "Send"):
+                button = driver._win.ButtonControl(Name=name)
+                if button.Exists(0.2, 0.1):
+                    return button
         except Exception:
             pass
         return None
+
+    @staticmethod
+    def _invoke_control(control: Any) -> tuple[bool, str]:
+        """Invoke a control through UIA patterns without moving the mouse."""
+        try:
+            import uiautomation as auto
+
+            invoke_pattern = control.GetPattern(auto.PatternId.InvokePattern)
+            if invoke_pattern is not None and invoke_pattern.Invoke(waitTime=0.2):
+                return True, "InvokePattern"
+        except Exception:
+            pass
+        try:
+            legacy_pattern = control.GetLegacyIAccessiblePattern()
+            if legacy_pattern is not None and legacy_pattern.DoDefaultAction(waitTime=0.2):
+                return True, "LegacyIAccessible.DoDefaultAction"
+        except Exception:
+            pass
+        try:
+            import uiautomation as auto
+
+            selection_pattern = control.GetPattern(auto.PatternId.SelectionItemPattern)
+            if selection_pattern is not None and selection_pattern.Select(waitTime=0.2):
+                return True, "SelectionItemPattern"
+        except Exception:
+            pass
+        return False, ""
 
     @staticmethod
     def _post_enter_without_focus(driver: Any) -> bool:
@@ -391,18 +474,342 @@ class WindowsUIASender:
             logger.debug("后台 UIA 投递回车失败: %s", exc)
             return False
 
+    @staticmethod
+    def _read_control_value(control: Any) -> str:
+        try:
+            pattern = control.GetValuePattern()
+            if pattern is not None:
+                return str(pattern.Value or "")
+        except Exception:
+            pass
+        try:
+            pattern = control.GetLegacyIAccessiblePattern()
+            if pattern is not None:
+                return str(getattr(pattern, "Value", "") or "")
+        except Exception:
+            pass
+        return ""
+
+    def _wait_input_empty(self, input_control: Any) -> bool:
+        deadline = time.monotonic() + self._input_verify_timeout
+        while time.monotonic() < deadline:
+            if not self._read_control_value(input_control).strip():
+                return True
+            time.sleep(0.1)
+        return not self._read_control_value(input_control).strip()
+
+    @staticmethod
+    def _normalize_text(value: Any) -> str:
+        return " ".join(str(value or "").replace("\r\n", "\n").split())
+
+    def _ui_contains_sent_text(self, driver: Any, text: str) -> bool:
+        """Look for the exact text in the visible UIA message list."""
+        try:
+            message_list = driver._message_list()
+        except Exception:
+            message_list = None
+        if message_list is None:
+            return False
+        expected = self._normalize_text(text)
+
+        def walk(control: Any, depth: int = 0) -> bool:
+            if depth > 12:
+                return False
+            try:
+                name = self._normalize_text(getattr(control, "Name", ""))
+                if name == expected:
+                    return True
+                children = control.GetChildren()
+            except Exception:
+                return False
+            for child in children:
+                if walk(child, depth + 1):
+                    return True
+            return False
+
+        return walk(message_list)
+
+    def _wait_ui_message(self, driver: Any, text: str) -> bool:
+        deadline = time.monotonic() + self._ui_verify_timeout
+        while time.monotonic() < deadline:
+            if self._ui_contains_sent_text(driver, text):
+                return True
+            time.sleep(0.2)
+        return self._ui_contains_sent_text(driver, text)
+
+    @staticmethod
+    def _pattern_summary(control: Any) -> dict[str, bool]:
+        summary: dict[str, bool] = {}
+        try:
+            import uiautomation as auto
+
+            for name, pattern_id in (
+                ("ValuePattern", auto.PatternId.ValuePattern),
+                ("InvokePattern", auto.PatternId.InvokePattern),
+                ("SelectionItemPattern", auto.PatternId.SelectionItemPattern),
+            ):
+                try:
+                    summary[name] = control.GetPattern(pattern_id) is not None
+                except Exception:
+                    summary[name] = False
+        except Exception:
+            pass
+        try:
+            summary["LegacyIAccessible"] = control.GetLegacyIAccessiblePattern() is not None
+        except Exception:
+            summary["LegacyIAccessible"] = False
+        return summary
+
     def _open_chat_sync(self, receiver: str, is_group: bool) -> bool:
         try:
-            driver = self._ensure_driver_window()
-            if driver is None:
-                return False
-            if self._open_chat_without_mouse(driver, receiver, is_group):
-                return True
+            for method in self._candidate_methods():
+                driver = self._ensure_driver_window(method)
+                if driver is None:
+                    continue
+                if self._open_chat_without_mouse(
+                    driver,
+                    receiver,
+                    is_group,
+                    background_mode=method == "background_uia",
+                ):
+                    return True
             logger.error("UIA 无法打开目标会话 | receiver=%s", receiver)
             return False
         except Exception as exc:
             logger.exception("UIA 打开会话失败 | receiver=%s | error=%s", receiver, exc)
             return False
+
+    def _candidate_methods(self) -> list[str]:
+        if self._send_mode == "auto":
+            return ["background_uia", "foreground_uia"]
+        return [self._send_mode]
+
+    def _post_key_without_focus(self, driver: Any, ctrl: bool = False) -> bool:
+        """Post an explicitly configured Enter/Ctrl+Enter sequence."""
+        try:
+            import ctypes
+
+            hwnd = int(getattr(driver._win, "NativeWindowHandle", 0) or 0)
+            if not hwnd:
+                return False
+            user32 = ctypes.windll.user32
+            user32.PostMessageW.argtypes = [
+                wintypes.HWND,
+                wintypes.UINT,
+                wintypes.WPARAM,
+                wintypes.LPARAM,
+            ]
+            user32.PostMessageW.restype = wintypes.BOOL
+            if ctrl and not user32.PostMessageW(hwnd, 0x0100, 0x11, 0x001D0001):
+                return False
+            for message, wparam, lparam in (
+                (0x0100, 0x000D, 0x001C0001),
+                (0x0102, 0x000D, 0x001C0001),
+                (0x0101, 0x000D, 0xC01C0001),
+            ):
+                if not user32.PostMessageW(hwnd, message, wparam, lparam):
+                    return False
+                time.sleep(0.05)
+            if ctrl and not user32.PostMessageW(hwnd, 0x0101, 0x11, 0xC01D0001):
+                return False
+            return True
+        except Exception as exc:
+            logger.debug("后台 UIA 按键投递失败: %s", exc)
+            return False
+
+    def _send_text_once(
+        self,
+        msg: str,
+        receiver: str,
+        is_group: bool,
+        target_id: str,
+        method: str,
+    ) -> SendResult:
+        result = SendResult.for_message(msg, target_id or receiver, method)
+        background = method == "background_uia"
+        try:
+            driver = self._ensure_driver_window(method)
+            if driver is None:
+                return result.fail("window", "window_not_found", "未找到绑定账号的 UIA 主窗口")
+
+            current_name = driver.current_chat()
+            input_control = driver._chat_input()
+            if current_name != receiver or input_control is None:
+                opened = self._open_chat_without_mouse(
+                    driver,
+                    receiver,
+                    is_group,
+                    background_mode=background,
+                )
+                if not opened and target_id and target_id != receiver:
+                    opened = self._open_chat_without_mouse(
+                        driver,
+                        target_id,
+                        is_group,
+                        background_mode=background,
+                    )
+                if not opened:
+                    return result.fail("search", "chat_open_failed", "无法唯一打开目标会话")
+                input_control = driver._chat_input()
+
+            if input_control is None:
+                return result.fail("draft", "input_not_found", "未找到聊天输入框")
+            if not self._set_text_without_mouse(
+                driver,
+                input_control,
+                msg,
+                allow_focus_fallback=not background,
+            ):
+                return result.fail("draft", "draft_write_failed", "UIA 无法写入消息正文")
+
+            written = self._read_control_value(input_control)
+            if self._normalize_text(written) != self._normalize_text(msg):
+                return result.fail(
+                    "draft",
+                    "draft_readback_mismatch",
+                    "输入框回读内容与待发送正文不一致",
+                    written=written,
+                )
+
+            button = self._find_send_button(driver, input_control)
+            invoke_method = ""
+            if button is not None:
+                invoked, invoke_method = self._invoke_control(button)
+                if not invoked:
+                    return result.fail(
+                        "invoke",
+                        "send_button_invoke_failed",
+                        "发送按钮存在但 Invoke/Legacy Pattern 调用失败",
+                        patterns=self._pattern_summary(button),
+                    )
+                result.action_performed = True
+            else:
+                if self._send_key_fallback == "none":
+                    return result.fail(
+                        "invoke",
+                        "send_button_not_found",
+                        "未找到真实发送按钮，且未启用按键兜底",
+                    )
+                if background:
+                    if not self._post_key_without_focus(
+                        driver,
+                        ctrl=self._send_key_fallback == "ctrl_enter",
+                    ):
+                        return result.fail(
+                            "invoke",
+                            "send_key_fallback_failed",
+                            "后台 UIA 按键兜底投递失败",
+                        )
+                else:
+                    if not input_control.SetFocus():
+                        return result.fail("invoke", "input_focus_failed", "无法聚焦聊天输入框")
+                    import uiautomation as auto
+
+                    keys = "{Ctrl}{Enter}" if self._send_key_fallback == "ctrl_enter" else "{Enter}"
+                    auto.SendKeys(keys, waitTime=0.1)
+                result.action_performed = True
+                invoke_method = f"key:{self._send_key_fallback}"
+
+            result.details["invoke_method"] = invoke_method
+            if not self._wait_input_empty(input_control):
+                return result.fail(
+                    "ui_verify",
+                    "send_not_accepted",
+                    "发送动作完成但输入框未清空，微信可能未接受发送",
+                )
+            result.draft_cleared = True
+
+            ui_verified = self._wait_ui_message(driver, msg)
+            result.ui_verified = ui_verified
+            if not ui_verified and self._require_ui_verify:
+                return result.fail(
+                    "ui_verify",
+                    "ui_message_not_found",
+                    "输入框已清空，但消息列表未找到本人发送正文",
+                )
+            return result.sent(
+                "ui_verify",
+                action_performed=True,
+                draft_cleared=True,
+                ui_verified=ui_verified,
+            )
+        except Exception as exc:
+            logger.exception("UIA 消息发送失败 | receiver=%s | error=%s", receiver, exc)
+            return result.fail("invoke", "uia_exception", str(exc))
+
+    def _diagnose_sync(self) -> dict[str, Any]:
+        target_pid = self._get_bound_pid()
+        payload: dict[str, Any] = {
+            "method": self._send_mode,
+            "selected_account": "",
+            "bound_pid": target_pid,
+            "driver_pid": self._driver_pid,
+            "window": None,
+            "uia_available": False,
+            "current_chat": "",
+            "search_box": None,
+            "chat_input": None,
+            "send_button": None,
+            "error": "",
+        }
+        try:
+            from app.core.platform import Platform
+
+            extractor = Platform.get().key_extractor
+            payload["selected_account"] = (
+                extractor.selected_account()
+                if hasattr(extractor, "selected_account")
+                else ""
+            )
+        except Exception:
+            pass
+        try:
+            driver = self._get_driver()
+            window = driver._find_main()
+            if window is None:
+                window = driver._win
+            if window is None:
+                payload["error"] = "未找到可访问的 mmui::MainWindow"
+                return payload
+            driver._win = window
+            payload["uia_available"] = True
+            payload["driver_pid"] = self._driver_pid
+            payload["window"] = {
+                "hwnd": int(getattr(window, "NativeWindowHandle", 0) or 0),
+                "class_name": str(getattr(window, "ClassName", "") or ""),
+                "name": str(getattr(window, "Name", "") or ""),
+            }
+            search_box = driver._search_box(window)
+            input_control = driver._chat_input(window)
+            button = self._find_send_button(driver, input_control) if input_control else None
+            payload["current_chat"] = driver.current_chat() or ""
+            payload["search_box"] = (
+                {
+                    "name": getattr(search_box, "Name", ""),
+                    "patterns": self._pattern_summary(search_box),
+                }
+                if search_box
+                else None
+            )
+            payload["chat_input"] = (
+                {
+                    "automation_id": getattr(input_control, "AutomationId", ""),
+                    "patterns": self._pattern_summary(input_control),
+                }
+                if input_control
+                else None
+            )
+            payload["send_button"] = (
+                {
+                    "name": getattr(button, "Name", ""),
+                    "patterns": self._pattern_summary(button),
+                }
+                if button
+                else None
+            )
+        except Exception as exc:
+            payload["error"] = str(exc)
+        return payload
 
     def _send_text_sync(
         self,
@@ -411,57 +818,4 @@ class WindowsUIASender:
         is_group: bool,
         target_id: str,
     ) -> bool:
-        try:
-            driver = self._ensure_driver_window()
-            if driver is None:
-                return False
-
-            current_name = driver.current_chat()
-            input_control = driver._chat_input()
-            if current_name != receiver or input_control is None:
-                opened = self._open_chat_without_mouse(driver, receiver, is_group)
-                if not opened and target_id and target_id != receiver:
-                    opened = self._open_chat_without_mouse(driver, target_id, is_group)
-                if not opened:
-                    logger.error("UIA 无法打开目标会话 | receiver=%s", receiver)
-                    return False
-                input_control = driver._chat_input()
-
-            if input_control is None:
-                logger.error("UIA 未找到聊天输入框 | receiver=%s", receiver)
-                return False
-            if not self._set_text_without_mouse(
-                driver,
-                input_control,
-                msg,
-                allow_focus_fallback=not self._background_mode,
-            ):
-                return False
-
-            if self._background_mode:
-                time.sleep(0.1)
-                if not self._post_enter_without_focus(driver):
-                    logger.error("后台 UIA 无法投递发送事件 | receiver=%s", receiver)
-                    return False
-                time.sleep(0.25)
-                try:
-                    remaining = input_control.GetValuePattern().Value
-                except Exception:
-                    remaining = ""
-                if remaining:
-                    logger.error(
-                        "后台 UIA 发送事件已投递但输入框未清空 | receiver=%s",
-                        receiver,
-                    )
-                    return False
-                return True
-
-            if not input_control.SetFocus():
-                return False
-            import uiautomation as auto
-
-            auto.SendKeys("{Enter}", waitTime=0.1)
-            return True
-        except Exception as exc:
-            logger.exception("UIA 消息发送失败 | receiver=%s | error=%s", receiver, exc)
-            return False
+        return self._send_text_sync_result(msg, receiver, is_group, target_id).success

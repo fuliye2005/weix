@@ -19,16 +19,21 @@ echo ============================================================
 REM 切换到项目根目录
 cd /d "%~dp0\.."
 set "PROJECT_DIR=%CD%"
-set "PYTHON_EXE=%PROJECT_DIR%\..\python313\python.exe"
 set "BACKEND_DIR=%PROJECT_DIR%\backend"
-
-REM 优先使用项目目录旁的便携 Python；没有时再回退到虚拟环境
-if not exist "%PYTHON_EXE%" (
-    set "PYTHON_EXE=%PROJECT_DIR%\venv\Scripts\python.exe"
-)
+REM UIA/pywin32 必须使用同一个 Python 3.12 虚拟环境，禁止混用外部嵌入式 Python。
+set "PYTHON_EXE=%PROJECT_DIR%\venv\Scripts\python.exe"
 
 if not exist "%PYTHON_EXE%" (
     echo [错误] 未找到 Python 运行时，请先运行 scripts\setup.bat
+    pause
+    exit /b 1
+)
+
+for /f "tokens=2" %%v in ('"%PYTHON_EXE%" --version 2^>^&1') do set "PYVER=%%v"
+echo [启动] Python %PYVER%: %PYTHON_EXE%
+"%PYTHON_EXE%" -c "import fastapi, uiautomation, wechatauto, win32ui; print('[检查] UIA 依赖路径一致')"
+if errorlevel 1 (
+    echo [错误] UIA 依赖导入失败，拒绝启动，避免跨 Python 版本加载 .pyd
     pause
     exit /b 1
 )
