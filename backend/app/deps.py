@@ -6,6 +6,7 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
 from app.config import get_config
+from app.db.migrations import migrate_schema
 from app.models.database import Base
 from app.services.message_service import MessageService
 from app.services.statistics_service import StatisticsService
@@ -71,3 +72,4 @@ async def init_database():
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(migrate_schema)
