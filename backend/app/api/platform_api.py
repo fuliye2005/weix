@@ -1,6 +1,9 @@
 """平台相关 API：联系人列表、群聊列表、数据库状态。"""
 
+import asyncio
+import logging
 import os
+import sys
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
@@ -9,6 +12,9 @@ from app.api.auth import verify_token
 from app.config import get_config
 from app.core.platform import Platform
 from app.utils.paths import get_config_dir, get_data_dir
+
+logger = logging.getLogger(__name__)
+_restart_task: asyncio.Task | None = None
 
 router = APIRouter(
     prefix="/api/platform",
@@ -172,6 +178,38 @@ async def select_account(payload: AccountSelectionRequest):
         "selected": wxid,
         "restart_required": True,
         "message": "账号已保存，请重启后端使数据库、监听和发送窗口切换到该账号",
+    }
+
+
+async def _restart_process_after_response() -> None:
+    """Replace the current backend process after the HTTP response is sent."""
+    await asyncio.sleep(0.8)
+    if getattr(sys, "frozen", False):
+        command = [sys.executable, *sys.argv[1:]]
+    else:
+        command = [sys.executable, "-m", "app.main", *sys.argv[1:]]
+
+    logger.warning("收到管理后台重启请求，正在重启后端进程")
+    os.execv(sys.executable, command)
+
+
+@router.post("/restart")
+async def restart_backend():
+    """Restart the backend so account and database selection take effect."""
+    global _restart_task
+
+    if _restart_task and not _restart_task.done():
+        return {
+            "success": True,
+            "restarting": True,
+            "message": "后端已经在重启中，请等待服务恢复",
+        }
+
+    _restart_task = asyncio.create_task(_restart_process_after_response())
+    return {
+        "success": True,
+        "restarting": True,
+        "message": "后端将在短暂延迟后重启",
     }
 
 

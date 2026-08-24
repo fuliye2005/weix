@@ -39,6 +39,14 @@
           <div v-if="accountHint" style="color: #909399; margin-top: 6px">
             {{ accountHint }}
           </div>
+          <div class="restart-row">
+            <el-button type="warning" :loading="restarting" @click="restartBackendNow">
+              <el-icon><RefreshRight /></el-icon>
+              {{ restartRequired ? '重启后端使账号生效' : '重启后端' }}
+            </el-button>
+            <span v-if="restartRequired">切换工作账号后，重启后端才会重新绑定数据库和微信窗口。</span>
+            <span v-else>重启后端会重新加载配置、数据库和自动回复流水线。</span>
+          </div>
         </el-form-item>
         <el-form-item label="群聊权限">
           <el-radio-group v-model="form.group_chat_mode">
@@ -117,8 +125,9 @@
 
 <script setup lang="ts">
 import { reactive, ref, onMounted } from 'vue'
-import { getChatConfig, updateChatConfig, getContacts, searchChatrooms, searchContactsApi, getWechatAccounts, selectWechatAccount } from '../api'
-import { ElMessage } from 'element-plus'
+import { getChatConfig, updateChatConfig, getContacts, searchChatrooms, searchContactsApi, getWechatAccounts, selectWechatAccount, restartBackend as restartBackendApi, getHealth } from '../api'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { RefreshRight } from '@element-plus/icons-vue'
 
 const form = reactive<any>({
   enabled: true,
@@ -146,6 +155,8 @@ const activeAccount = ref('')
 const activeAccountLabel = ref('')
 const accountLoading = ref(false)
 const accountHint = ref('')
+const restartRequired = ref(false)
+const restarting = ref(false)
 
 function roomName(id: string) {
   const found = allChatrooms.value.find((r: any) => r.room_id === id)
@@ -236,6 +247,7 @@ async function changeAccount(wxid: string) {
     const res = await selectWechatAccount(wxid || '')
     if (res.data?.success) {
       accountHint.value = '账号已保存，请重启后端后切换数据库和微信窗口。'
+      restartRequired.value = true
       ElMessage.success('工作账号已保存')
     } else {
       ElMessage.error(res.data?.error || '账号切换失败')
@@ -244,6 +256,54 @@ async function changeAccount(wxid: string) {
     accountHint.value = ''
   } finally {
     accountLoading.value = false
+  }
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+async function restartBackendNow() {
+  try {
+    await ElMessageBox.confirm(
+      '后端会短暂断开并重新加载账号、数据库和自动回复流水线，确定继续吗？',
+      '确认重启后端',
+      { type: 'warning', confirmButtonText: '立即重启', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+
+  restarting.value = true
+  try {
+    await restartBackendApi()
+    ElMessage.info('后端正在重启，正在等待服务恢复…')
+
+    const deadline = Date.now() + 60000
+    let ready = false
+    while (Date.now() < deadline) {
+      await sleep(1000)
+      try {
+        const health = await getHealth()
+        if (health.data?.status === 'ok') {
+          ready = true
+          break
+        }
+      } catch {
+        // 服务重启期间请求失败是预期状态，继续轮询。
+      }
+    }
+
+    if (!ready) {
+      throw new Error('后端超过 60 秒仍未恢复，请检查启动窗口或日志')
+    }
+
+    ElMessage.success('后端已重启，正在刷新账号状态')
+    window.location.reload()
+  } catch (error: any) {
+    ElMessage.error(error?.message || '后端重启失败')
+  } finally {
+    restarting.value = false
   }
 }
 
@@ -271,6 +331,7 @@ onMounted(async () => {
     const active = res.data?.active || ''
     activeAccount.value = active
     selectedAccount.value = res.data?.selected || active || ''
+    restartRequired.value = Boolean(selectedAccount.value && selectedAccount.value !== active)
     const activeInfo = accounts.value.find((account: any) => account.active)
     if (activeInfo) {
       activeAccountLabel.value = accountLabel(activeInfo)
@@ -303,3 +364,22 @@ async function saveConfig() {
   }
 }
 </script>
+
+<style scoped>
+.restart-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  color: #909399;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+@media (max-width: 640px) {
+  .restart-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+</style>

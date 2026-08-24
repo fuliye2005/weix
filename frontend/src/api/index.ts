@@ -116,6 +116,7 @@ export const searchContactsApi = (keyword: string) => api.get('/platform/contact
 export const getPlatformStatus = () => api.get('/platform/status')
 export const getWechatAccounts = () => api.get('/platform/accounts')
 export const selectWechatAccount = (wxid: string) => api.put('/platform/account', { wxid })
+export const restartBackend = () => api.post('/platform/restart')
 
 // Health
 export const getHealth = () => api.get('/health')
