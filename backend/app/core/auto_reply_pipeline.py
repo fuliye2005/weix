@@ -8,10 +8,12 @@ import asyncio
 import logging
 import os
 import re
+from datetime import datetime
 from typing import Optional
 
 from app.config import get_config
 from app.core.message_monitor import MessageMonitor
+from app.core.send_result import SendResult
 from app.core.platform import Platform
 from app.utils.paths import get_data_dir
 
@@ -551,6 +553,7 @@ class AutoReplyPipeline:
         config = get_config().auto_reply
         reply_mode = config.get("reply_mode", "all")
         reply_text = ""
+        reply_source = ""
 
         # 1. 规则匹配（逐条匹配，取第一条命中）
         if reply_mode in ("keyword", "all") and self._rule_engine:
@@ -558,6 +561,7 @@ class AutoReplyPipeline:
                 result = await self._rule_engine.match(m.content)
                 if result.get("matched"):
                     reply_text = result.get("reply", "")
+                    reply_source = "rule"
                     workflow_name = result.get("workflow", "")
                     if workflow_name and self._workflow_engine:
                         await self._workflow_engine.start_workflow(workflow_name, m.sender)
@@ -568,12 +572,27 @@ class AutoReplyPipeline:
             ai_msg = reply_messages[0]
             ai_msg.content = combined
             reply_text = await self._ai_chat(ai_msg)
+            reply_source = "ai"
 
         reply_text = self._clean_reply_for_wechat(reply_text)
 
         # 3. 发送回复
         if reply_text:
             display_name = self._name_map.get(receiver, receiver)
+            outbound = await self._create_outbound_reply_log(
+                content=reply_text,
+                target_id=receiver,
+                target_name=display_name,
+                is_group=msg.is_group,
+                reply_to_msg_id=msg.msg_id,
+                reply_source=reply_source or "manual",
+            )
+            if outbound is not None:
+                await self._update_outbound_reply_log(
+                    outbound.attempt_id,
+                    status="sending",
+                )
+
             force_skip = self._is_unsearchable_name(display_name)
             if force_skip:
                 logger.error(
@@ -581,15 +600,33 @@ class AutoReplyPipeline:
                     receiver, display_name,
                     msg.is_group,
                 )
+                if outbound is not None:
+                    await self._update_outbound_reply_log(
+                        outbound.attempt_id,
+                        status="skipped",
+                        error_code="unsearchable_target",
+                        error_message="接收者没有可搜索的显示名称",
+                    )
                 return
-            success = await self._sender.send_text(
+
+            result = await self._send_reply_with_result(
                 reply_text,
                 display_name,
-                force_skip=False,
                 is_group=msg.is_group,
                 target_id=receiver,
+                attempt_id=outbound.attempt_id if outbound is not None else "",
             )
-            if success:
+            if outbound is not None:
+                await self._update_outbound_reply_log(
+                    outbound.attempt_id,
+                    status=result.status,
+                    send_method=result.method,
+                    error_code=result.error_code,
+                    error_message=result.error_message,
+                    sent_at=datetime.now() if result.status == "sent" else None,
+                )
+
+            if result.success:
                 if self._monitor:
                     self._monitor.remember_sent_message(receiver, reply_text)
                 logger.info(
@@ -605,6 +642,128 @@ class AutoReplyPipeline:
                     display_name,
                     msg.is_group,
                 )
+
+    async def _create_outbound_reply_log(
+        self,
+        *,
+        content: str,
+        target_id: str,
+        target_name: str,
+        is_group: bool,
+        reply_to_msg_id: str,
+        reply_source: str,
+    ):
+        """Create the outbound row before touching the WeChat UI."""
+        if self._session_factory is None:
+            return None
+        try:
+            from app.services.message_service import MessageService
+
+            async with self._session_factory() as session:
+                service = MessageService(session)
+                return await service.create_outbound_attempt(
+                    content=content,
+                    target_id=target_id,
+                    target_name=target_name,
+                    is_group=is_group,
+                    reply_to_msg_id=reply_to_msg_id,
+                    reply_source=reply_source,
+                    send_method=self._sender_method(),
+                    status="generated",
+                )
+        except Exception as exc:
+            logger.error("创建出站回复日志失败: %s", exc)
+            return None
+
+    async def _update_outbound_reply_log(self, attempt_id: str, **changes) -> None:
+        """Update one outbound row while keeping send failures observable."""
+        if not attempt_id or self._session_factory is None:
+            return
+        try:
+            from app.services.message_service import MessageService
+
+            async with self._session_factory() as session:
+                service = MessageService(session)
+                await service.update_outbound_attempt(attempt_id, **changes)
+        except Exception as exc:
+            logger.error(
+                "更新出站回复日志失败 | attempt_id=%s | error=%s",
+                attempt_id,
+                exc,
+            )
+
+    def _sender_method(self) -> str:
+        sender = self._sender
+        if sender is None:
+            return ""
+        uia_sender = getattr(sender, "_uia_sender", None)
+        if uia_sender is not None and getattr(uia_sender, "_send_mode", ""):
+            return str(uia_sender._send_mode)
+        return str(getattr(sender, "_method", "") or "")
+
+    async def _send_reply_with_result(
+        self,
+        content: str,
+        receiver: str,
+        *,
+        is_group: bool,
+        target_id: str,
+        attempt_id: str = "",
+    ) -> SendResult:
+        """Use structured sender results when available, with a bool adapter."""
+        sender = self._sender
+        method = self._sender_method() or "legacy"
+        try:
+            send_result = getattr(sender, "send_text_result", None)
+            if send_result is not None:
+                try:
+                    return await send_result(
+                        content,
+                        receiver,
+                        force_skip=False,
+                        is_group=is_group,
+                        target_id=target_id,
+                        attempt_id=attempt_id,
+                    )
+                except TypeError as exc:
+                    if not any(
+                        name in str(exc)
+                        for name in ("attempt_id", "force_skip")
+                    ):
+                        raise
+                    return await send_result(
+                        content,
+                        receiver,
+                        force_skip=False,
+                        is_group=is_group,
+                        target_id=target_id,
+                    )
+
+            success = await sender.send_text(
+                content,
+                receiver,
+                force_skip=False,
+                is_group=is_group,
+                target_id=target_id,
+            )
+            result = SendResult.for_message(
+                content,
+                target_id or receiver,
+                method,
+                attempt_id,
+            )
+            if success:
+                result.action_performed = True
+                return result.sent("invoke", action_performed=True)
+            return result.fail("invoke", "send_failed", "发送器返回失败")
+        except Exception as exc:
+            logger.exception("发送自动回复异常 | receiver=%s", receiver)
+            return SendResult.for_message(
+                content,
+                target_id or receiver,
+                method,
+                attempt_id,
+            ).fail("invoke", "send_exception", str(exc))
 
     @staticmethod
     def _is_unsearchable_name(name: str) -> bool:

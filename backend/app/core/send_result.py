@@ -36,12 +36,20 @@ class SendResult:
     details: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def for_message(cls, content: str, target_id: str, method: str) -> "SendResult":
+    def for_message(
+        cls,
+        content: str,
+        target_id: str,
+        method: str,
+        attempt_id: str = "",
+    ) -> "SendResult":
         result = cls(
             method=method,
             target_id=str(target_id or ""),
             content_hash=hashlib.sha256(str(content or "").encode("utf-8")).hexdigest(),
         )
+        if attempt_id:
+            result.attempt_id = str(attempt_id)
         return result
 
     def fail(self, stage: str, code: str, message: str, **details: Any) -> "SendResult":
@@ -74,4 +82,3 @@ class SendResult:
         data = asdict(self)
         data["success"] = bool(self.success)
         return data
-

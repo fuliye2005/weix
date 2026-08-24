@@ -114,8 +114,9 @@ class WindowsUIASender:
         receiver: str,
         is_group: bool = False,
         target_id: str = "",
+        attempt_id: str = "",
     ) -> bool:
-        result = await self.send_text_result(msg, receiver, is_group, target_id)
+        result = await self.send_text_result(msg, receiver, is_group, target_id, attempt_id)
         return result.success
 
     async def send_text_result(
@@ -124,10 +125,11 @@ class WindowsUIASender:
         receiver: str,
         is_group: bool = False,
         target_id: str = "",
+        attempt_id: str = "",
     ) -> SendResult:
         """Send text and retain stage-level UIA diagnostics."""
         method = self._send_mode
-        result = SendResult.for_message(msg, target_id or receiver, method)
+        result = SendResult.for_message(msg, target_id or receiver, method, attempt_id)
         if not msg or not receiver:
             result.fail("draft", "invalid_request", "消息内容或接收者为空")
             self._last_result = result
@@ -140,6 +142,7 @@ class WindowsUIASender:
             receiver,
             is_group,
             target_id,
+            attempt_id,
         )
         self._last_result = result
         return result
@@ -624,8 +627,9 @@ class WindowsUIASender:
         is_group: bool,
         target_id: str,
         method: str,
+        attempt_id: str = "",
     ) -> SendResult:
-        result = SendResult.for_message(msg, target_id or receiver, method)
+        result = SendResult.for_message(msg, target_id or receiver, method, attempt_id)
         background = method == "background_uia"
         try:
             driver = self._ensure_driver_window(method)
@@ -817,8 +821,9 @@ class WindowsUIASender:
         receiver: str,
         is_group: bool,
         target_id: str,
+        attempt_id: str = "",
     ) -> bool:
-        return self._send_text_sync_result(msg, receiver, is_group, target_id).success
+        return self._send_text_sync_result(msg, receiver, is_group, target_id, attempt_id).success
 
     def _send_text_sync_result(
         self,
@@ -826,6 +831,7 @@ class WindowsUIASender:
         receiver: str,
         is_group: bool,
         target_id: str,
+        attempt_id: str = "",
     ) -> SendResult:
         """Run the configured UIA mode(s) serially inside the UIA executor."""
         last_result: SendResult | None = None
@@ -836,6 +842,7 @@ class WindowsUIASender:
                 is_group,
                 target_id,
                 method,
+                attempt_id,
             )
             if result.success:
                 return result
@@ -853,4 +860,5 @@ class WindowsUIASender:
             msg,
             target_id or receiver,
             self._send_mode,
+            attempt_id,
         ).fail("window", "uia_not_attempted", "没有可用的 UIA 发送模式")

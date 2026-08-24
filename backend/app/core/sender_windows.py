@@ -233,6 +233,7 @@ class WindowsSender(BaseMessageSender):
         force_skip: bool = False,
         is_group: bool = False,
         target_id: str = "",
+        attempt_id: str = "",
     ) -> bool:
         """发送文本消息。
 
@@ -252,6 +253,7 @@ class WindowsSender(BaseMessageSender):
             force_skip=force_skip,
             is_group=is_group,
             target_id=target_id,
+            attempt_id=attempt_id,
         )
         return result.success
 
@@ -262,17 +264,24 @@ class WindowsSender(BaseMessageSender):
         force_skip: bool = False,
         is_group: bool = False,
         target_id: str = "",
+        attempt_id: str = "",
     ) -> SendResult:
         """Send text and retain structured delivery diagnostics."""
         method = self._method if self._method in {"uia", "uia_only", "uia-first"} else "mouse"
-        result = SendResult.for_message(msg, target_id or receiver, method)
+        result = SendResult.for_message(msg, target_id or receiver, method, attempt_id)
         if not msg or not receiver:
             result.fail("draft", "invalid_request", "消息内容或接收者为空")
             self._last_result = result
             return result
 
         if self._method in {"uia", "uia_only", "uia-first"}:
-            result = await self._send_text_uia_result(msg, receiver, is_group, target_id)
+            result = await self._send_text_uia_result(
+                msg,
+                receiver,
+                is_group,
+                target_id,
+                attempt_id,
+            )
             if result.success or not self._allow_mouse_fallback:
                 self._last_result = result
                 return result
@@ -284,6 +293,7 @@ class WindowsSender(BaseMessageSender):
                 force_skip,
                 is_group,
                 target_id,
+                attempt_id,
             )
             self._last_result = result
             return result
@@ -294,6 +304,7 @@ class WindowsSender(BaseMessageSender):
             force_skip,
             is_group,
             target_id,
+            attempt_id,
         )
         self._last_result = result
         return result
@@ -309,8 +320,9 @@ class WindowsSender(BaseMessageSender):
         force_skip: bool,
         is_group: bool,
         target_id: str,
+        attempt_id: str = "",
     ) -> SendResult:
-        result = SendResult.for_message(msg, target_id or receiver, "mouse")
+        result = SendResult.for_message(msg, target_id or receiver, "mouse", attempt_id)
         loop = asyncio.get_running_loop()
         success = await loop.run_in_executor(
             _executor,
@@ -341,8 +353,15 @@ class WindowsSender(BaseMessageSender):
         receiver: str,
         is_group: bool,
         target_id: str,
+        attempt_id: str = "",
     ) -> bool:
-        result = await self._send_text_uia_result(msg, receiver, is_group, target_id)
+        result = await self._send_text_uia_result(
+            msg,
+            receiver,
+            is_group,
+            target_id,
+            attempt_id,
+        )
         return result.success
 
     async def _send_text_uia_result(
@@ -351,6 +370,7 @@ class WindowsSender(BaseMessageSender):
         receiver: str,
         is_group: bool,
         target_id: str,
+        attempt_id: str = "",
     ) -> SendResult:
         if self._uia_sender is None:
             from app.core.sender_windows_uia import WindowsUIASender
@@ -362,6 +382,7 @@ class WindowsSender(BaseMessageSender):
             receiver,
             is_group=is_group,
             target_id=target_id,
+            attempt_id=attempt_id,
         )
         if not result.success or not self._verify_after_send:
             return result

@@ -4,11 +4,15 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.core.auto_reply_pipeline import AutoReplyPipeline
 from app.core.base import WeChatMessage
+from app.core.send_result import SendResult
+from app.models.database import Base, Message
 
 
 class FakeRuleEngine:
@@ -31,6 +35,29 @@ class FakeSender:
 
     def reset_search_state(self):
         pass
+
+
+class FakeStructuredSender(FakeSender):
+    def __init__(self):
+        super().__init__()
+        self.results = []
+        self._method = "foreground_uia"
+
+    async def send_text_result(self, msg, receiver, **kwargs):
+        self.sent.append((msg, receiver, kwargs))
+        result = SendResult.for_message(
+            msg,
+            kwargs.get("target_id") or receiver,
+            "foreground_uia",
+            kwargs.get("attempt_id", ""),
+        )
+        result.action_performed = True
+        result.draft_cleared = True
+        result.ui_verified = True
+        result.db_verified = True
+        result = result.sent("db_verify", db_verified=True, ui_verified=True)
+        self.results.append(result)
+        return result
 
 
 class FakeMonitor:
@@ -107,6 +134,49 @@ async def test_flush_buffer_uses_platform_sender_with_is_group(monkeypatch):
         )
     ]
     assert pipeline._monitor.remembered == [("room@chatroom", "自动回复")]
+
+
+@pytest.mark.asyncio
+async def test_auto_reply_persists_outbound_lifecycle_and_reply_link(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "app.core.auto_reply_pipeline.get_config",
+        lambda: SimpleNamespace(auto_reply={"reply_mode": "keyword"}),
+    )
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'reply.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    sender = FakeStructuredSender()
+    pipeline = AutoReplyPipeline(session_factory=factory)
+    pipeline._sender = sender
+    pipeline._rule_engine = FakeRuleEngine()
+    pipeline._monitor = FakeMonitor()
+    pipeline._park_after_send = False
+    pipeline._debounce_seconds = 0
+    pipeline._name_map = {"wxid_friend": "朋友"}
+    pipeline._buffer["wxid_friend"] = [_private_msg(content="在吗")]
+
+    await pipeline._flush_buffer("wxid_friend")
+
+    async with factory() as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(Message).where(Message.direction == "outbound")
+                )
+            ).scalars()
+        )
+
+    assert len(rows) == 1
+    assert rows[0].status == "sent"
+    assert rows[0].reply_to_msg_id == "private:1"
+    assert rows[0].reply_source == "rule"
+    assert rows[0].attempt_id == sender.results[0].attempt_id
+    assert rows[0].send_method == "foreground_uia"
+
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
