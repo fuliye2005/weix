@@ -88,6 +88,8 @@ windows_sender:
   verify_after_send: true
   verify_timeout: 30.0
   verify_interval: 1.0
+  # UIA 已执行发送但微信数据库稍后才落盘时，后台只查库确认，不会再次发送
+  pending_verify_retries: 2
   search_result_delay: 2.0
   skip_search_ttl: 60
   type_delay: 0.3

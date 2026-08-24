@@ -7,7 +7,7 @@
 - **收消息**：直接读取微信本地 SQLite 数据库（纯文件 I/O，微信进程无感知）
 - **AI 回复**：LangChain 编排大模型，支持多轮对话、工具调用、意图识别
 - **发消息**：Windows 优先使用 UI Automation 控件调用，鼠标发送可配置为显式兜底；macOS 使用 AppleScript
-  - Windows：`uia` 后台模式不激活微信、不移动鼠标，通过窗口消息投递发送事件；`mouse` 模式使用旧版 GUI 发送器
+  - Windows：`uia` 模式按账号绑定的微信 PID 获取 UIA 窗口，写入聊天输入框并调用真实发送按钮的 `InvokePattern` / `LegacyIAccessible.DoDefaultAction`；`mouse` 模式使用旧版 GUI 发送器
   - macOS：AppleScript 模拟键盘输入
 - **可视化管理**：Vue3 Web 后台，配置 AI、规则、模板，开箱即用
 
@@ -89,19 +89,36 @@ cp .env.example .env
 
 然后编辑这两个文件，填入你的 API Key 等信息。
 
-Windows 后台发送建议使用以下配置：
+Windows UIA 发送建议先使用前台 UIA 配置：
 
 ```yaml
 windows_sender:
   method: uia
-  background_mode: true
+  send_mode: foreground_uia
+  background_mode: false
   allow_mouse_fallback: false
+  send_key_fallback: none
+  require_ui_verify: true
+  verify_after_send: true
+  pending_verify_retries: 2
   park_after_send: false
 ```
 
-后台模式会直接调用微信当前可见的会话列表项，再通过 UIA 的无障碍模式写入和发送，
-不会把微信窗口切到前台。若目标会话不在当前可见会话列表中，系统会记录发送失败，
-不会偷偷回退到搜索框、键盘或鼠标操作。
+`foreground_uia` 允许短暂激活微信窗口，但不移动鼠标、不依赖坐标点击；发送时必须先通过所选账号的 PID 绑定校验，
+再写入输入框并调用发送按钮 Pattern。`background_uia` 只使用已经存在的 UIA 控件树，不主动激活窗口；
+如果目标会话或控件树不可访问，会记录明确错误码并失败，不会偷偷回退到键盘或鼠标。
+
+发送结果分为三层确认：
+
+1. `invoke`：发送按钮 Pattern 已被调用。
+2. `ui_verify`：输入框已清空，并且消息列表发现本人发送的正文。
+3. `db_verify`：目标会话的本地消息数据库发现同一正文。若微信落盘较慢，状态暂时为 `pending_verify`，
+   后台只查库重试，不会重复调用 UIA 发送动作。
+
+管理后台“聊天配置 → UIA 检测”可以查看 `binding_status`、选中账号、绑定账号、绑定 PID、驱动 PID、窗口 PID、
+输入框、发送按钮和 `error_code`。常见绑定错误码包括 `ambiguous_process`、`account_binding_mismatch`、
+`account_binding_unverified`、`window_pid_mismatch`；常见投递错误码包括 `target_id_required`、
+`db_not_confirmed`、`uia_exception`。
 
 ### macOS
 

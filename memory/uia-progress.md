@@ -16,7 +16,7 @@
 
 ## 当前结论
 
-UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可以被热激活，项目也已经存在发送按钮查找逻辑。当前发送流程已经接入 UIA 同步执行入口，会真正调用发送按钮的 Pattern，并返回分阶段结果；真实微信窗口和真实联系人仍未做最终验收。
+UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可以被热激活，项目也已经存在发送按钮查找逻辑。当前发送流程已经接入 UIA 同步执行入口，会真正调用发送按钮的 Pattern，并返回分阶段结果；发送后支持 UI、数据库和 pending 查库确认。真实微信窗口和真实联系人仍未做最终验收。
 
 管理界面现在可以执行只读 UIA 检测，返回选中账号、绑定 PID、窗口句柄、当前会话、搜索框、聊天输入框和发送按钮的 Pattern 信息。检测不会发送消息，也不会主动移动鼠标。
 
@@ -57,7 +57,7 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 
 以下项目仍未完成或尚未得到真实运行验证：
 
-- [ ] 增加数据库验证，确认发送成功消息已经写入本地消息记录。
+- [x] 增加数据库验证，按 `target_id` 和正文哈希确认发送成功消息已经写入本地消息记录；未及时落盘时进入 `pending_verify`，后台只查库，不重复发送。
 - [ ] 增加多账号绑定、账号选择和账号在线状态的完整验证。
 - [ ] 在用户主动确认后，使用“文件传输助手”完成最小真实发送测试。
 - [ ] 完成真实微信私聊和群聊发送验证。
@@ -69,7 +69,7 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 1. 固定后端启动解释器和依赖环境。
 2. 完成 UIA 控件探测与结构化发送结果。
 3. 实现发送按钮 `InvokePattern` / `DoDefaultAction`。
-4. 增加发送后的 UI 和数据库双重验证。
+4. 增加发送后的 UI 和数据库双重验证；数据库延迟时由后台 pending 查库任务收敛状态。
 5. 修复群聊发送者、正文和消息方向模型。
 6. 增加迁移、API、前端日志和管理操作。
 7. 通过本地测试后，再进行用户确认的真实消息测试。
@@ -83,6 +83,31 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 - 发送失败时能看到明确失败阶段和原因，而不是只有“发送失败”。
 - 发送成功必须同时具备 UI 验证和数据库记录，不能只依赖函数没有抛异常。
 - 重启后配置、账号状态和日志仍能正确恢复。
+
+## UIA 技术验收要点
+
+### 账号和进程绑定
+
+发送器不会在多个微信进程中猜窗口。账号选择先写入配置；后端重启后由密钥/数据目录提取器确认所选账号，
+得到 `bound_account` 和 `bound_pid`。UIA 驱动创建时带入这个 PID，主窗口、输入框和发送按钮都必须来自同一个 PID。
+无法确认 PID 时返回 `ambiguous_process`；账号不一致时返回 `account_binding_mismatch`；找到 PID 但无法证明归属时返回
+`account_binding_unverified`；窗口 PID 不一致时返回 `window_pid_mismatch`。
+
+### 控件和发送动作
+
+`foreground_uia` 会短暂激活已绑定窗口，但不移动鼠标、不使用坐标点击。发送链路依次检查主窗口、搜索框、聊天输入框，
+通过 ValuePattern 写入并回读正文，再查找真正的发送按钮，优先调用 `InvokePattern`，其次调用
+`LegacyIAccessible.DoDefaultAction`。只有显式配置 `send_key_fallback: enter` 或 `ctrl_enter` 才会使用按键兜底，默认关闭。
+
+`background_uia` 不主动激活窗口，只接受已经 materialized 的 UIA 控件树；目标会话不在可见会话列表或控件树不可用时直接返回错误，
+不会自动降级到前台、坐标点击或鼠标发送。
+
+### 发送后确认和日志
+
+UIA Pattern 调用成功不等于消息已经落盘。系统先记录 `invoke` 和 `ui_verify` 阶段，再使用严格的 `target_id` 查询目标会话的
+消息表，只匹配本人发送、文本类型、时间窗口内且正文哈希一致的记录。查库未及时确认时返回 `pending_verify`；后续任务调用
+`verify_pending_result()`，只读数据库，不会重新进入 UIA 发送路径。最终状态、错误阶段、错误码、目标 ID、内容哈希、尝试 ID
+会写回同一条出站日志。
 
 ## 风险与边界
 
@@ -113,3 +138,5 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 - `0b5380a feat: add UIA diagnostics to chat config`
 - `a1fa893 feat: add UIA diagnostics endpoint`
 - `1db76cd feat: expose message delivery logs`
+- `d26ff82 fix: settle pending deliveries without resending`
+- `c9caba4 feat: expose delivery and UIA diagnostics in admin`
