@@ -60,10 +60,19 @@
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="sender_name" label="发送者" width="120" />
-      <el-table-column prop="room_name" label="群聊" width="150" show-overflow-tooltip />
+      <el-table-column label="发送者/对象" width="150" show-overflow-tooltip>
+        <template #default="{ row }">
+          {{ row.direction === 'outbound' ? (row.target_name || row.target_id || '-') : (row.sender_name || row.sender_wxid || '-') }}
+        </template>
+      </el-table-column>
+      <el-table-column label="会话" width="150" show-overflow-tooltip>
+        <template #default="{ row }">
+          {{ conversationLabel(row) }}
+        </template>
+      </el-table-column>
       <el-table-column prop="send_method" label="发送方式" width="125" show-overflow-tooltip />
       <el-table-column prop="reply_source" label="回复来源" width="95" />
+      <el-table-column prop="error_code" label="错误码" width="150" show-overflow-tooltip />
       <el-table-column label="类型" width="80">
         <template #default="{ row }">
           <el-tag size="small">{{ typeLabel(row.msg_type) }}</el-tag>
@@ -90,8 +99,12 @@
     <el-dialog title="消息详情" v-model="detailVisible" width="500px">
       <el-descriptions :column="1" border>
         <el-descriptions-item label="消息ID">{{ detail.msg_id }}</el-descriptions-item>
-        <el-descriptions-item label="发送者">{{ detail.sender_name }} ({{ detail.sender_wxid }})</el-descriptions-item>
-        <el-descriptions-item label="群聊">{{ detail.room_name || '私聊' }} ({{ detail.room_id }})</el-descriptions-item>
+        <el-descriptions-item label="发送者/对象">
+          {{ detail.direction === 'outbound' ? (detail.target_name || detail.target_id || '-') : (detail.sender_name || detail.sender_wxid || '-') }}
+          <span v-if="detail.direction !== 'outbound' && detail.sender_wxid"> ({{ detail.sender_wxid }})</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="会话">{{ conversationLabel(detail) }}</el-descriptions-item>
+        <el-descriptions-item label="目标会话 ID">{{ detail.target_id || '-' }}</el-descriptions-item>
         <el-descriptions-item label="类型">{{ typeLabel(detail.msg_type) }}</el-descriptions-item>
         <el-descriptions-item label="方向">{{ directionLabel(detail.direction) }}</el-descriptions-item>
         <el-descriptions-item label="状态">{{ statusLabel(detail.status) }}</el-descriptions-item>
@@ -99,7 +112,11 @@
         <el-descriptions-item label="回复来源">{{ detail.reply_source || '-' }}</el-descriptions-item>
         <el-descriptions-item label="尝试ID">{{ detail.attempt_id || '-' }}</el-descriptions-item>
         <el-descriptions-item label="关联消息">{{ detail.reply_to_msg_id || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="内容哈希">
+          <span class="hash-value">{{ detail.content_hash || '-' }}</span>
+        </el-descriptions-item>
         <el-descriptions-item label="错误阶段">{{ detail.error_stage || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="错误码">{{ detail.error_code || '-' }}</el-descriptions-item>
         <el-descriptions-item label="错误原因">
           <div style="white-space: pre-wrap; max-height: 120px; overflow: auto">{{ detail.error_message || '-' }}</div>
         </el-descriptions-item>
@@ -142,6 +159,12 @@ function typeLabel(type: number) {
 
 function directionLabel(direction: string) {
   return direction === 'outbound' ? '发出' : '收到'
+}
+
+function conversationLabel(row: any) {
+  if (!row) return '-'
+  if (row.is_group) return row.room_name || row.target_name || row.room_id || row.target_id || '-'
+  return row.target_name || row.room_name || row.target_id || row.room_id || '私聊'
 }
 
 function statusLabel(status: string) {
@@ -202,3 +225,11 @@ function viewDetail(row: any) {
 
 onMounted(loadMessages)
 </script>
+
+<style scoped>
+.hash-value {
+  word-break: break-all;
+  font-family: monospace;
+  font-size: 12px;
+}
+</style>

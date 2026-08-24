@@ -137,6 +137,11 @@
           <el-descriptions-item label="发送模式">
             {{ uiaDiagnosis.method || '-' }}
           </el-descriptions-item>
+          <el-descriptions-item label="绑定状态">
+            <el-tag :type="bindingStatusType(uiaDiagnosis.binding_status)">
+              {{ bindingStatusLabel(uiaDiagnosis.binding_status) }}
+            </el-tag>
+          </el-descriptions-item>
           <el-descriptions-item label="当前会话">
             {{ uiaDiagnosis.current_chat || '-' }}
           </el-descriptions-item>
@@ -146,8 +151,14 @@
           <el-descriptions-item label="绑定 PID">
             {{ uiaDiagnosis.bound_pid || '-' }}
           </el-descriptions-item>
+          <el-descriptions-item label="绑定账号">
+            {{ uiaDiagnosis.bound_account || '-' }}
+          </el-descriptions-item>
           <el-descriptions-item label="驱动 PID">
             {{ uiaDiagnosis.driver_pid || '-' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="错误码">
+            {{ uiaDiagnosis.error_code || '-' }}
           </el-descriptions-item>
           <el-descriptions-item label="会话列表">
             {{ uiaDiagnosis.session_list ? '已发现' : '未发现' }}
@@ -378,6 +389,23 @@ function controlSummary(control: any) {
     .map(([name]) => name)
   const name = control.name || '无名称'
   return patterns.length ? `${name} · ${patterns.join('、')}` : `${name} · 未发现可用模式`
+}
+
+function bindingStatusLabel(status: string) {
+  const map: Record<string, string> = {
+    bound: '已绑定',
+    ambiguous_process: '进程不明确',
+    binding_unavailable: '绑定状态不可读',
+    account_binding_mismatch: '账号不匹配',
+    account_binding_unverified: '账号未确认',
+  }
+  return map[status] || status || '未知'
+}
+
+function bindingStatusType(status: string) {
+  if (status === 'bound') return 'success'
+  if (status === 'account_binding_unverified') return 'warning'
+  return 'danger'
 }
 
 async function diagnoseUiaNow() {
