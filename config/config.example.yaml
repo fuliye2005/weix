@@ -63,10 +63,10 @@ macos_sender:
 
 windows_sender:
   method: uia
-  # 当前稳定主路径：允许短暂激活微信窗口，但不移动鼠标、不使用坐标点击
-  send_mode: foreground_uia
-  background_mode: false
-  allow_foreground_activation: true
+  # 当前 Windows 4.x 验收主路径：后台 UIA + WM_LBUTTON，不前置窗口、不抢输入设备
+  send_mode: background_uia
+  background_mode: true
+  allow_foreground_activation: false
   # 窄窗口时通过 Win32 ShowWindow 恢复完整导航布局，不执行鼠标或坐标点击
   ensure_full_layout: true
   allow_mouse_fallback: false

@@ -1,7 +1,7 @@
 import hashlib
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -119,6 +119,127 @@ class MessageService:
         for key, value in changes.items():
             if key in allowed:
                 setattr(record, key, value)
+        await self.session.commit()
+        return record
+
+    async def materialize_self_message(
+        self,
+        *,
+        msg_id: str,
+        msg_type: int = 1,
+        content: str,
+        sender: str,
+        room_id: str = "",
+        room_name: str = "",
+        is_group: bool = False,
+        create_time: datetime | None = None,
+        target_name: str = "",
+    ) -> Message:
+        """Merge a database-observed self message into its outbound attempt.
+
+        The Windows message database is also the monitor's source for messages
+        sent by this account. Persisting that row as a normal inbound message
+        creates a duplicate in the log, so first claim the nearest matching
+        outbound attempt and replace its temporary ID with WeChat's real ID.
+        """
+        observed_at = create_time or datetime.now()
+        content = str(content or "")
+        msg_id = str(msg_id or "")
+        sender = str(sender or "")
+        room_id = str(room_id or "")
+        target_id = room_id if is_group else sender
+        target_name = str(target_name or "")
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+        existing_result = await self.session.execute(
+            select(Message).where(Message.msg_id == msg_id)
+        )
+        existing = existing_result.scalar_one_or_none()
+
+        window_start = observed_at - timedelta(seconds=30)
+        window_end = observed_at + timedelta(seconds=30)
+        candidate_result = await self.session.execute(
+            select(Message)
+            .where(
+                Message.direction == "outbound",
+                Message.msg_id.like("outbound:%"),
+                Message.target_id == target_id,
+                Message.content_hash == content_hash,
+                Message.status.notin_(["failed", "skipped"]),
+                Message.create_time >= window_start,
+                Message.create_time <= window_end,
+            )
+            .order_by(Message.create_time.desc())
+            .limit(20)
+        )
+        candidates = list(candidate_result.scalars().all())
+        if existing is not None and existing.direction != "outbound":
+            candidates = [candidate for candidate in candidates if candidate.id != existing.id]
+
+        record = min(
+            candidates,
+            key=lambda candidate: abs(
+                (candidate.create_time - observed_at).total_seconds()
+            ) if candidate.create_time else float("inf"),
+            default=None,
+        )
+
+        if existing is not None and existing.direction == "outbound":
+            record = existing
+        elif existing is not None and record is None:
+            # Repair a legacy row that was previously persisted as inbound.
+            record = existing
+        elif existing is not None and record is not None:
+            # Remove the duplicate legacy inbound row before assigning its
+            # unique real message ID to the outbound attempt.
+            await self.session.delete(existing)
+            await self.session.flush()
+
+        if record is None:
+            record = Message(
+                msg_id=msg_id,
+                msg_type=msg_type,
+                content=content,
+                sender_wxid="",
+                sender_name="",
+                room_id=room_id,
+                room_name=room_name,
+                is_group=is_group,
+                direction="outbound",
+                status="sent",
+                content_hash=content_hash,
+                send_method="database_observed",
+                reply_source="observed",
+                sent_at=observed_at,
+                target_id=target_id,
+                target_name=target_name,
+                create_time=observed_at,
+            )
+            self.session.add(record)
+        else:
+            record.msg_id = msg_id
+            record.msg_type = msg_type
+            record.content = content
+            record.sender_wxid = ""
+            record.sender_name = ""
+            record.room_id = room_id or record.room_id
+            record.room_name = room_name or record.room_name
+            record.is_group = is_group
+            record.direction = "outbound"
+            record.status = "sent"
+            record.content_hash = content_hash
+            record.sent_at = observed_at
+            record.target_id = target_id or record.target_id
+            record.target_name = target_name or record.target_name
+            if not record.send_method:
+                record.send_method = "database_observed"
+            if not record.reply_source:
+                record.reply_source = "observed"
+            record.error_stage = "db_verify"
+            record.error_code = None
+            record.error_message = None
+            record.create_time = observed_at
+
         await self.session.commit()
         return record
 

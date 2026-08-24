@@ -84,3 +84,81 @@ async def test_message_service_user_filter_matches_inbound_sender_and_outbound_t
     assert total == 2
     assert {row.direction for row in rows} == {"inbound", "outbound"}
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_message_service_materializes_self_message_into_outbound_attempt(tmp_path):
+    db_path = tmp_path / "self-message.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    observed_at = datetime.now()
+    async with factory() as session:
+        service = MessageService(session)
+        attempt = await service.create_outbound_attempt(
+            content="后台发送",
+            target_id="wxid_friend",
+            target_name="朋友",
+            send_method="background_uia",
+            status="pending_verify",
+        )
+
+        record = await service.materialize_self_message(
+            msg_id="Msg_private:42",
+            content="后台发送",
+            sender="wxid_friend",
+            create_time=observed_at,
+            target_name="朋友",
+        )
+
+        rows = list((await session.execute(select(Message))).scalars())
+
+    assert len(rows) == 1
+    assert record.msg_id == "Msg_private:42"
+    assert record.direction == "outbound"
+    assert record.status == "sent"
+    assert record.attempt_id == attempt.attempt_id
+    assert record.target_id == "wxid_friend"
+    assert record.create_time == observed_at
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_message_service_repairs_legacy_inbound_duplicate(tmp_path):
+    db_path = tmp_path / "legacy-self-message.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        service = MessageService(session)
+        attempt = await service.create_outbound_attempt(
+            content="旧日志修复",
+            target_id="wxid_friend",
+            target_name="朋友",
+        )
+        await service.save_message(
+            {
+                "msg_id": "Msg_private:legacy",
+                "content": "旧日志修复",
+                "sender": "wxid_friend",
+                "create_time": datetime.now(),
+            }
+        )
+
+        record = await service.materialize_self_message(
+            msg_id="Msg_private:legacy",
+            content="旧日志修复",
+            sender="wxid_friend",
+            target_name="朋友",
+        )
+        rows = list((await session.execute(select(Message))).scalars())
+
+    assert len(rows) == 1
+    assert record.direction == "outbound"
+    assert record.msg_id == "Msg_private:legacy"
+    assert record.attempt_id == attempt.attempt_id
+    await engine.dispose()

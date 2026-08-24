@@ -360,6 +360,48 @@ async def test_handle_self_message_only_records_memory(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_handle_self_message_persists_one_outbound_row(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "app.core.auto_reply_pipeline.get_config",
+        lambda: SimpleNamespace(
+            auto_reply={
+                "enabled": True,
+                "private_chat_mode": "all",
+            }
+        ),
+    )
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'self-log.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    sender = FakeSender()
+    agent = FakeAgent()
+    pipeline = AutoReplyPipeline(session_factory=factory)
+    pipeline._sender = sender
+    pipeline._ai_agent = agent
+    pipeline._monitor = FakeMonitor()
+    pipeline._park_after_send = False
+    pipeline._name_map = {"wxid_friend": "朋友"}
+    message = _private_msg(is_self=True, content="我刚发的")
+    message.create_time = datetime.now()
+
+    await pipeline._handle_message(message)
+
+    async with factory() as session:
+        rows = list((await session.execute(select(Message))).scalars())
+
+    assert len(rows) == 1
+    assert rows[0].msg_id == "private:1"
+    assert rows[0].direction == "outbound"
+    assert rows[0].status == "sent"
+    assert rows[0].target_id == "wxid_friend"
+    assert sender.sent == []
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_flush_buffer_cleans_reply_before_sending(monkeypatch):
     monkeypatch.setattr(
         "app.core.auto_reply_pipeline.get_config",

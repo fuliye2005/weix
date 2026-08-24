@@ -910,6 +910,27 @@ class AutoReplyPipeline:
             from app.services.message_service import MessageService
             async with self._session_factory() as session:
                 service = MessageService(session)
+                if getattr(msg, "is_self", False):
+                    target_id = msg.room_id if msg.is_group else msg.sender
+                    target_name = self._name_map.get(target_id, target_id) if target_id else ""
+                    record = await service.materialize_self_message(
+                        msg_id=msg.msg_id,
+                        msg_type=msg.msg_type,
+                        content=msg.content or "",
+                        sender=msg.sender,
+                        room_id=msg.room_id or "",
+                        room_name=self._name_map.get(msg.room_id, "") if msg.room_id else "",
+                        is_group=msg.is_group,
+                        create_time=msg.create_time,
+                        target_name=target_name,
+                    )
+                    logger.info(
+                        "自发消息已合并到出站日志 | msg_id=%s | target_id=%s | attempt_id=%s",
+                        record.msg_id,
+                        record.target_id,
+                        record.attempt_id or "",
+                    )
+                    return
                 await service.save_message({
                     "msg_id": msg.msg_id,
                     "msg_type": msg.msg_type,
