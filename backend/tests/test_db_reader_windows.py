@@ -120,3 +120,35 @@ def test_windows_v4_self_sent_fallback_keeps_local_send_signature():
     ).fetchone()
 
     assert reader._is_self_sent_v4_row(local_send_row) is True
+
+
+def test_windows_v4_group_sender_uses_name2id_rowid_and_cleans_prefix():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE Name2Id (user_name TEXT)")
+    conn.execute("INSERT INTO Name2Id (rowid, user_name) VALUES (1, 'wxid_me')")
+    conn.execute("INSERT INTO Name2Id (rowid, user_name) VALUES (7, 'wxid_friend')")
+
+    reader = WindowsDBReader()
+    reader._sqlite_conn = conn
+    row = conn.execute(
+        "SELECT 7 AS real_sender_id, ? AS source",
+        (b"unrelated protobuf bytes",),
+    ).fetchone()
+
+    sender = reader._resolve_v4_group_sender(row, "room@chatroom")
+    content = reader._clean_group_content("wxid_friend:\n你好", sender)
+
+    assert sender == "wxid_friend"
+    assert content == "你好"
+
+
+def test_windows_group_content_prefix_fallback_does_not_use_room_id_as_sender():
+    reader = WindowsDBReader()
+
+    sender = reader._parse_group_sender_from_content("wxid_member:\n收到")
+    content = reader._clean_group_content("wxid_member:\n收到", sender)
+
+    assert sender == "wxid_member"
+    assert content == "收到"
+    assert reader._clean_group_content("时间: 10:00", "room@chatroom") == "时间: 10:00"

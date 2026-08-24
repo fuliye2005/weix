@@ -8,6 +8,7 @@ import hashlib
 import hmac as hmac_mod
 import logging
 import os
+import re
 import sqlite3
 import struct
 import tempfile
@@ -80,6 +81,7 @@ class WindowsDBReader(BaseDBReader):
         self._key_mode: str = ""
         self._lock = threading.Lock()
         self._msg_table_cache: Optional[list[tuple[str, str]]] = None
+        self._name2id_cache: Optional[dict[int, str]] = None
         self._last_refresh: float = 0
         self._current_sender_id: Optional[int] = None
 
@@ -117,6 +119,9 @@ class WindowsDBReader(BaseDBReader):
                 check_same_thread=False,
             )
             self._sqlite_conn.row_factory = sqlite3.Row
+            self._msg_table_cache = None
+            self._name2id_cache = None
+            self._current_sender_id = None
             logger.info("数据库打开成功")
             return True
         except Exception as exc:
@@ -146,6 +151,8 @@ class WindowsDBReader(BaseDBReader):
                 )
                 self._sqlite_conn.row_factory = sqlite3.Row
                 self._msg_table_cache = None
+                self._name2id_cache = None
+                self._current_sender_id = None
                 self._last_refresh = time.monotonic()
             if old_conn:
                 try:
@@ -237,6 +244,11 @@ class WindowsDBReader(BaseDBReader):
                     except Exception:
                         content = str(content)
 
+                if is_group:
+                    sender_from_content = self._parse_group_sender_from_content(content)
+                    sender = sender_from_content or sender
+                    content = self._clean_group_content(content, sender)
+
                 msg = WeChatMessage(
                     msg_id=str(row["msg_id"] or ""),
                     msg_type=msg_type,
@@ -299,7 +311,8 @@ class WindowsDBReader(BaseDBReader):
                     is_group = "@chatroom" in username
                     sender = username
                     if is_group:
-                        sender = self._parse_group_sender(row["source"], username)
+                        sender = self._resolve_v4_group_sender(row, username)
+                        content = self._clean_group_content(content, sender)
 
                     messages.append(
                         WeChatMessage(
@@ -865,6 +878,42 @@ class WindowsDBReader(BaseDBReader):
         logger.info(f"Windows 4.x 消息表缓存已构建: {len(self._msg_table_cache)} 个会话表")
         return self._msg_table_cache
 
+    def _get_name2id_map(self) -> dict[int, str]:
+        """读取 Windows 4.x 消息库中的 Name2Id.rowid -> user_name 映射。"""
+        if self._name2id_cache is not None:
+            return self._name2id_cache
+
+        self._name2id_cache = {}
+        if self._sqlite_conn is None:
+            return self._name2id_cache
+
+        try:
+            cursor = self._sqlite_conn.execute(
+                "SELECT rowid, user_name FROM Name2Id WHERE user_name IS NOT NULL"
+            )
+            for row in cursor:
+                user_name = str(row["user_name"] or "").strip()
+                if user_name:
+                    self._name2id_cache[int(row["rowid"])] = user_name
+        except Exception as exc:
+            logger.debug("读取 Name2Id 映射失败: %s", exc)
+
+        return self._name2id_cache
+
+    def _resolve_v4_group_sender(self, row, fallback: str) -> str:
+        """按 real_sender_id 解析群成员，失败时再使用 source 和群会话 ID。"""
+        try:
+            real_sender_id = int(row["real_sender_id"] or 0)
+        except (TypeError, ValueError, IndexError):
+            real_sender_id = 0
+
+        if real_sender_id:
+            sender = self._get_name2id_map().get(real_sender_id, "")
+            if sender:
+                return sender
+
+        return self._parse_group_sender(row["source"], fallback)
+
     def _is_self_sent_v4_row(self, row) -> bool:
         """识别当前账号自己发出的 Windows 4.x 消息。"""
         real_sender_id = row["real_sender_id"] or 0
@@ -944,13 +993,14 @@ class WindowsDBReader(BaseDBReader):
 
     @staticmethod
     def _parse_group_sender(source_blob, fallback: str) -> str:
-        if not source_blob or not isinstance(source_blob, bytes):
+        if not source_blob:
             return fallback
         try:
-            import re
-
-            text = source_blob.decode("utf-8", errors="replace")
-            match = re.search(r"wxid_[a-z0-9]+", text)
+            if isinstance(source_blob, bytes):
+                text = source_blob.decode("utf-8", errors="replace")
+            else:
+                text = str(source_blob)
+            match = re.search(r"(?:wxid|gh)_[a-z0-9_-]+", text, re.IGNORECASE)
             if match:
                 return match.group(0)
             match = re.search(r"\d+@openim", text)
@@ -959,6 +1009,39 @@ class WindowsDBReader(BaseDBReader):
         except Exception:
             pass
         return fallback
+
+    @staticmethod
+    def _parse_group_sender_from_content(content: str) -> str:
+        """从旧版群消息正文前缀提取发送者 ID。"""
+        text = str(content or "")
+        match = re.match(
+            r"^\s*((?:wxid|gh)_[a-z0-9_-]+|\d+@openim)\s*:\s*(?:\r?\n|$)",
+            text,
+            re.IGNORECASE,
+        )
+        return match.group(1) if match else ""
+
+    @classmethod
+    def _clean_group_content(cls, content: str, sender: str = "") -> str:
+        """移除微信群消息正文中重复的发送者前缀。"""
+        text = str(content or "")
+        candidates = [str(sender or "").strip()]
+        parsed = cls._parse_group_sender_from_content(text)
+        if parsed:
+            candidates.append(parsed)
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+            prefix = re.compile(
+                rf"^\s*{re.escape(candidate)}\s*:\s*(?:\r?\n|$)",
+                re.IGNORECASE,
+            )
+            cleaned, count = prefix.subn("", text, count=1)
+            if count:
+                return cleaned.strip()
+
+        return text.strip()
 
     @staticmethod
     def _derive_mac_key(enc_key: bytes, salt: bytes, hash_name: str = "sha512") -> bytes:
@@ -1314,15 +1397,21 @@ class WindowsDBReader(BaseDBReader):
                 )
                 is_group = "@chatroom" in username
                 for row in cursor:
+                    content = self._decode_message_content(row["message_content"])
+                    sender = username
+                    if is_group:
+                        sender = self._resolve_v4_group_sender(row, username)
+                        content = self._clean_group_content(content, sender)
                     messages.append(
                         WeChatMessage(
                             msg_id=f"{table}:{row['local_id']}",
                             msg_type=row["local_type"] or 0,
-                            content=self._decode_message_content(row["message_content"]),
-                            sender=username,
+                            content=content,
+                            sender=sender,
                             room_id=username if is_group else "",
                             create_time=datetime.fromtimestamp(row["create_time"] or 0),
                             is_group=is_group,
+                            is_self=self._is_self_sent_v4_row(row),
                             at_list=[],
                         )
                     )
@@ -1356,18 +1445,22 @@ class WindowsDBReader(BaseDBReader):
             )
             is_group = "@chatroom" in talker
             for row in cursor:
+                content = self._decode_message_content(row["message_content"])
+                is_self = self._is_self_sent_v4_row(row)
                 sender = talker
-                if is_group and not self._is_self_sent_v4_row(row):
-                    sender = self._parse_group_sender(row["source"], talker)
+                if is_group:
+                    sender = self._resolve_v4_group_sender(row, talker)
+                    content = self._clean_group_content(content, sender)
                 messages.append(
                     WeChatMessage(
                         msg_id=f"{table}:{row['local_id']}",
                         msg_type=row["local_type"] or 0,
-                        content=self._decode_message_content(row["message_content"]),
+                        content=content,
                         sender=sender,
                         room_id=talker if is_group else "",
                         create_time=datetime.fromtimestamp(row["create_time"] or 0),
                         is_group=is_group,
+                        is_self=is_self,
                         at_list=[],
                     )
                 )

@@ -58,8 +58,8 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 - [x] 增加发送后的 UI 状态验证，确认输入框已清空或消息气泡已出现。
 - [ ] 增加数据库验证，确认发送成功消息已经写入本地消息记录。
 - [x] 增加结构化 `SendResult`，区分窗口、搜索、输入框、按钮调用、UI 验证和数据库验证阶段。
-- [ ] 修复群聊 `real_sender_id -> Name2Id.rowid -> user_name` 的发送者解析。
-- [ ] 统一群聊入站和出站正文清理，移除正文中的 `wxid_xxx:` 前缀。
+- [x] 修复群聊 `real_sender_id -> Name2Id.rowid -> user_name` 的发送者解析。
+- [x] 统一群聊入站和出站正文清理，移除正文中的 `wxid_xxx:` 前缀。
 - [ ] 为 `messages` 表增加消息方向、发送状态、失败原因、发送时间和回复关联字段。
 - [ ] 编写数据库迁移脚本，兼容已经存在的 SQLite 数据库。
 - [ ] 在消息 API 中返回消息方向、发送状态、失败原因和发送者信息。
@@ -105,4 +105,7 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 
 - `python -m compileall`：通过（UIA 发送器和 `SendResult`）。
 - Python 3.12 依赖导入：通过，`pywin32`、`uiautomation`、`wechatauto` 来自 `D:\Wechat_bot\weix\venv`。
-- UIA 单元测试：尚未执行，当前虚拟环境缺少 `pytest`，不能据此宣称测试通过。
+- 已安装 `pytest 9.1.1` 到当前 `venv`。
+- 群聊解析专项测试：通过，`4 passed`。
+- Windows 路径扫描全量测试仍有 2 项旧失败，原因是测试临时目录没有覆盖真实微信目录发现结果；与本次群聊解析改动无关。
+- UIA 真实控件测试：尚未执行，仍不能据此宣称真实发送已完成。
