@@ -19,6 +19,8 @@ import sys
 import os
 import time
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # 清除缓存配置强制重载
@@ -26,6 +28,14 @@ import app.config
 app.config._config = None
 
 from app.core.sender_macos import MacOSSender
+
+pytestmark = [
+    pytest.mark.skipif(
+        os.getenv("WEIX_RUN_LIVE_WECHAT_TESTS") != "1",
+        reason="真实微信集成测试仅在 WEIX_RUN_LIVE_WECHAT_TESTS=1 时运行",
+    ),
+    pytest.mark.asyncio,
+]
 
 PRIVATE_TARGET = "小号"
 GROUP_TARGET = "贵州铜仁市129办公室工作群"

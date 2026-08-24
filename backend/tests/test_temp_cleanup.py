@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,7 +23,13 @@ async def test_temp_cleanup_loop_runs_cleanup_before_sleep(monkeypatch):
         assert interval_seconds == 12
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(temp_cleanup.MacOSDBReader, "cleanup_temp_files", fake_cleanup)
+    monkeypatch.setattr(
+        temp_cleanup.Platform,
+        "get",
+        lambda: SimpleNamespace(
+            db_reader=SimpleNamespace(cleanup_temp_files=fake_cleanup),
+        ),
+    )
     monkeypatch.setattr(temp_cleanup.asyncio, "sleep", fake_sleep)
 
     with pytest.raises(asyncio.CancelledError):

@@ -15,8 +15,13 @@ fake_pyautogui = types.SimpleNamespace(
     screenshot=lambda: None,
     size=lambda: types.SimpleNamespace(width=1, height=1),
 )
-sys.modules.setdefault("pyautogui", fake_pyautogui)
+_original_pyautogui = sys.modules.get("pyautogui")
+sys.modules["pyautogui"] = fake_pyautogui
 screenshot_helper = importlib.import_module("app.core.screenshot_helper")
+if _original_pyautogui is None:
+    sys.modules.pop("pyautogui", None)
+else:
+    sys.modules["pyautogui"] = _original_pyautogui
 
 
 def test_screenshot_helper_reports_concise_capture_errors(monkeypatch, tmp_path, capsys):

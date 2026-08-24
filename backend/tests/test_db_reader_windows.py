@@ -25,6 +25,12 @@ def test_windows_db_reader_find_database_files_scans_wechat_documents(tmp_path, 
     micro_msg_db.write_text("x")
     ignored.write_text("x")
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(WindowsDBReader, "_configured_wxid", staticmethod(lambda: ""))
+    monkeypatch.setattr(
+        WindowsDBReader,
+        "_get_data_dirs",
+        classmethod(lambda cls: [str(base.parent)]),
+    )
 
     files = WindowsDBReader().find_database_files()
 
@@ -48,9 +54,11 @@ def test_windows_db_reader_find_database_files_scans_xwechat_storage(tmp_path, m
     contact_db.write_text("x")
     ignored.write_text("x")
 
+    monkeypatch.setattr(WindowsDBReader, "_configured_wxid", staticmethod(lambda: ""))
     monkeypatch.setattr(
-        "app.core.db_reader_windows.find_wechat_data_dirs",
-        lambda: [WeChatDataDir(str(tmp_path / "xwechat_files"), "test")],
+        WindowsDBReader,
+        "_get_data_dirs",
+        classmethod(lambda cls: [str(tmp_path / "xwechat_files")]),
     )
 
     files = WindowsDBReader().find_database_files()
