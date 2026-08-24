@@ -113,7 +113,7 @@ class _SelectedWeChatUIA:
             def _wechat_hwnds(self):
                 handles = super()._wechat_hwnds()
                 if target_pid is None:
-                    return handles
+                    return []
                 return [
                     handle
                     for handle in handles
@@ -150,6 +150,8 @@ class WindowsUIASender:
         self._ui_verify_timeout = float(win_cfg.get("ui_verify_timeout", 4.0))
         self._require_ui_verify = bool(win_cfg.get("require_ui_verify", True))
         self._last_result: SendResult | None = None
+        self._last_binding_error: dict[str, Any] | None = None
+        self._last_background_capability: dict[str, Any] = {}
 
     async def send_text(
         self,
@@ -223,6 +225,66 @@ class WindowsUIASender:
         except Exception:
             return None
 
+    def _binding_info(self) -> dict[str, Any]:
+        """Return the selected-account/PID binding state used by UIA."""
+        info: dict[str, Any] = {
+            "selected_account": "",
+            "bound_account": "",
+            "bound_pid": None,
+            "status": "ambiguous_process",
+            "error_code": "ambiguous_process",
+            "error_message": "没有确认所选微信账号对应的主进程 PID，拒绝选择任意窗口",
+        }
+        try:
+            from app.core.platform import Platform
+
+            extractor = Platform.get().key_extractor
+            selected = (
+                extractor.selected_account()
+                if hasattr(extractor, "selected_account")
+                else ""
+            )
+            bound_account = str(getattr(extractor, "bound_account", "") or "")
+            bound_pid = getattr(extractor, "bound_pid", None)
+            info["selected_account"] = str(selected or "")
+            info["bound_account"] = bound_account
+            info["bound_pid"] = int(bound_pid) if bound_pid else None
+        except Exception as exc:
+            info.update(
+                status="binding_unavailable",
+                error_code="binding_unavailable",
+                error_message=f"无法读取微信账号绑定状态: {exc}",
+            )
+            return info
+
+        selected = str(info["selected_account"] or "").casefold()
+        bound_account = str(info["bound_account"] or "").casefold()
+        if not info["bound_pid"]:
+            return info
+        if selected and bound_account and selected != bound_account:
+            return {
+                **info,
+                "status": "account_binding_mismatch",
+                "error_code": "account_binding_mismatch",
+                "error_message": (
+                    f"所选账号 {info['selected_account']} 与已绑定账号 "
+                    f"{info['bound_account']} 不一致"
+                ),
+            }
+        if selected and not bound_account:
+            return {
+                **info,
+                "status": "account_binding_unverified",
+                "error_code": "account_binding_unverified",
+                "error_message": "已找到微信进程 PID，但无法确认它属于所选账号",
+            }
+        return {
+            **info,
+            "status": "bound",
+            "error_code": "",
+            "error_message": "",
+        }
+
     def _get_driver(self):
         target_pid = self._get_bound_pid()
         with self._driver_lock:
@@ -234,14 +296,22 @@ class WindowsUIASender:
     def _is_running_sync(self) -> bool:
         _prepare_windows_imports()
         try:
-            from wechatauto.uia_driver import WeChatUIA
-
-            return bool(WeChatUIA.is_running())
+            if self._binding_info()["status"] != "bound":
+                return False
+            driver = self._get_driver()
+            return driver._find_main() is not None
         except Exception as exc:
             logger.debug("UIA 检查微信进程失败: %s", exc)
             return False
 
     def _ensure_driver_window(self, method: str | None = None):
+        binding = self._binding_info()
+        if binding["status"] != "bound":
+            self._last_binding_error = binding
+            logger.error("UIA 账号绑定不可用 | code=%s | message=%s", binding["error_code"], binding["error_message"])
+            return None
+
+        self._last_binding_error = None
         driver = self._get_driver()
         background = method == "background_uia" if method else self._background_mode
         if background:
@@ -252,11 +322,168 @@ class WindowsUIASender:
                 logger.error("后台 UIA 未找到可访问的微信主窗口，不切换前台")
                 return None
             driver._win = window
+            if not self._window_matches_bound_pid(driver, window, binding["bound_pid"]):
+                return None
             return driver
         if not driver.ensure_window():
             logger.error("UIA 未找到可访问的微信主窗口")
             return None
+        if not self._window_matches_bound_pid(driver, driver._win, binding["bound_pid"]):
+            return None
         return driver
+
+    def _window_matches_bound_pid(self, driver: Any, window: Any, target_pid: int) -> bool:
+        actual_pid = _window_pid_from_control(driver, window)
+        if actual_pid != int(target_pid):
+            self._last_binding_error = {
+                "status": "window_pid_mismatch",
+                "error_code": "window_pid_mismatch",
+                "error_message": (
+                    f"UIA 窗口 PID {actual_pid or '-'} 与绑定 PID {target_pid} 不一致"
+                ),
+                "bound_pid": target_pid,
+                "window_pid": actual_pid,
+            }
+            logger.error(self._last_binding_error["error_message"])
+            return False
+        return True
+
+    @staticmethod
+    def _supports_legacy_value(control: Any) -> bool:
+        try:
+            pattern = control.GetLegacyIAccessiblePattern()
+            return pattern is not None and callable(getattr(pattern, "SetValue", None))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _supports_invoke(control: Any) -> bool:
+        try:
+            legacy = control.GetLegacyIAccessiblePattern()
+            if legacy is not None and callable(getattr(legacy, "DoDefaultAction", None)):
+                return True
+        except Exception:
+            pass
+        try:
+            import uiautomation as auto
+
+            for pattern_id in (
+                auto.PatternId.InvokePattern,
+                auto.PatternId.SelectionItemPattern,
+            ):
+                if control.GetPattern(pattern_id) is not None:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _probe_background_capability(self) -> dict[str, Any]:
+        """Check background-only patterns before attempting any send action."""
+        capability: dict[str, Any] = {
+            "available": False,
+            "method": "background_uia",
+            "reason_code": "",
+            "reason": "",
+            "window": None,
+            "session_list": False,
+            "search_box": None,
+            "chat_input": None,
+            "send_button": None,
+        }
+        binding = self._binding_info()
+        if binding["status"] != "bound":
+            capability.update(
+                reason_code=binding["error_code"],
+                reason=binding["error_message"],
+            )
+            self._last_background_capability = capability
+            return capability
+
+        driver = self._ensure_driver_window("background_uia")
+        if driver is None:
+            binding_error = self._last_binding_error or {}
+            capability.update(
+                reason_code=binding_error.get("error_code", "background_window_unavailable"),
+                reason=binding_error.get("error_message", "后台 UIA 未找到绑定窗口"),
+            )
+            self._last_background_capability = capability
+            return capability
+
+        window = driver._win
+        hwnd = int(getattr(window, "NativeWindowHandle", 0) or 0)
+        capability["window"] = {
+            "hwnd": hwnd,
+            "pid": _window_pid_from_control(driver, window),
+            "class_name": str(getattr(window, "ClassName", "") or ""),
+        }
+        missing: list[str] = []
+        try:
+            session_list = window.ListControl(AutomationId="session_list")
+            capability["session_list"] = bool(session_list.Exists(0.2, 0.1))
+        except Exception:
+            capability["session_list"] = False
+        if not capability["session_list"]:
+            missing.append("session_list")
+
+        try:
+            search_box = driver._search_box(window)
+        except Exception:
+            search_box = None
+        capability["search_box"] = (
+            {
+                "patterns": self._pattern_summary(search_box),
+                "legacy_value": self._supports_legacy_value(search_box),
+            }
+            if search_box
+            else None
+        )
+        if search_box is None or not self._supports_legacy_value(search_box):
+            missing.append("search_box_legacy_value")
+
+        try:
+            input_control = driver._chat_input(window)
+        except Exception:
+            input_control = None
+        capability["chat_input"] = (
+            {
+                "patterns": self._pattern_summary(input_control),
+                "legacy_value": self._supports_legacy_value(input_control),
+            }
+            if input_control
+            else None
+        )
+        if input_control is None or not self._supports_legacy_value(input_control):
+            missing.append("chat_input_legacy_value")
+
+        button = self._find_send_button(driver, input_control) if input_control else None
+        capability["send_button"] = (
+            {
+                "name": str(getattr(button, "Name", "") or ""),
+                "patterns": self._pattern_summary(button),
+                "invokable": self._supports_invoke(button),
+            }
+            if button
+            else None
+        )
+        if button is None or not self._supports_invoke(button):
+            missing.append("send_button_invoke")
+
+        if self._require_ui_verify:
+            try:
+                if driver._message_list() is None:
+                    missing.append("message_list")
+            except Exception:
+                missing.append("message_list")
+
+        if missing:
+            capability.update(
+                reason_code="background_patterns_incomplete",
+                reason="后台 UIA 缺少必要控件或 Pattern: " + ", ".join(missing),
+            )
+        else:
+            capability["available"] = True
+        self._last_background_capability = capability
+        return capability
 
     @staticmethod
     def _invoke_without_mouse(control: Any) -> bool:
@@ -627,7 +854,15 @@ class WindowsUIASender:
 
     def _candidate_methods(self) -> list[str]:
         if self._send_mode == "auto":
-            return ["background_uia", "foreground_uia"]
+            capability = self._probe_background_capability()
+            if capability.get("available"):
+                return ["background_uia", "foreground_uia"]
+            logger.info(
+                "后台 UIA 能力不足，自动选择前台 UIA | code=%s | reason=%s",
+                capability.get("reason_code", ""),
+                capability.get("reason", ""),
+            )
+            return ["foreground_uia"]
         return [self._send_mode]
 
     def _post_key_without_focus(self, driver: Any, ctrl: bool = False) -> bool:
@@ -677,7 +912,13 @@ class WindowsUIASender:
         try:
             driver = self._ensure_driver_window(method)
             if driver is None:
-                return result.fail("window", "window_not_found", "未找到绑定账号的 UIA 主窗口")
+                binding_error = self._last_binding_error or {}
+                return result.fail(
+                    "window",
+                    binding_error.get("error_code", "window_not_found"),
+                    binding_error.get("error_message", "未找到绑定账号的 UIA 主窗口"),
+                    binding=binding_error,
+                )
 
             current_name = driver.current_chat()
             input_control = driver._chat_input()
@@ -785,10 +1026,13 @@ class WindowsUIASender:
             return result.fail("invoke", "uia_exception", str(exc))
 
     def _diagnose_sync(self) -> dict[str, Any]:
-        target_pid = self._get_bound_pid()
+        binding = self._binding_info()
+        target_pid = binding.get("bound_pid")
         payload: dict[str, Any] = {
             "method": self._send_mode,
-            "selected_account": "",
+            "selected_account": binding.get("selected_account", ""),
+            "bound_account": binding.get("bound_account", ""),
+            "binding_status": binding.get("status", ""),
             "bound_pid": target_pid,
             "driver_pid": self._driver_pid,
             "window": None,
@@ -798,19 +1042,12 @@ class WindowsUIASender:
             "search_box": None,
             "chat_input": None,
             "send_button": None,
+            "error_code": binding.get("error_code", ""),
             "error": "",
         }
-        try:
-            from app.core.platform import Platform
-
-            extractor = Platform.get().key_extractor
-            payload["selected_account"] = (
-                extractor.selected_account()
-                if hasattr(extractor, "selected_account")
-                else ""
-            )
-        except Exception:
-            pass
+        if binding["status"] != "bound":
+            payload["error"] = binding.get("error_message", "账号绑定不可用")
+            return payload
         try:
             driver = self._get_driver()
             window = driver._find_main()
@@ -820,6 +1057,17 @@ class WindowsUIASender:
                 payload["error"] = "未找到可访问的 mmui::MainWindow"
                 return payload
             driver._win = window
+            if not self._window_matches_bound_pid(driver, window, target_pid):
+                binding_error = self._last_binding_error or {}
+                payload["error_code"] = binding_error.get("error_code", "window_pid_mismatch")
+                payload["error"] = binding_error.get("error_message", "UIA 窗口 PID 不匹配")
+                payload["window"] = {
+                    "hwnd": int(getattr(window, "NativeWindowHandle", 0) or 0),
+                    "pid": _window_pid_from_control(driver, window),
+                    "class_name": str(getattr(window, "ClassName", "") or ""),
+                    "name": str(getattr(window, "Name", "") or ""),
+                }
+                return payload
             payload["uia_available"] = True
             payload["driver_pid"] = self._driver_pid
             hwnd = int(getattr(window, "NativeWindowHandle", 0) or 0)
@@ -909,6 +1157,14 @@ class WindowsUIASender:
                 return result
             last_result = result
             if self._send_mode != "auto":
+                break
+            if result.action_performed or result.draft_cleared:
+                logger.error(
+                    "UIA 已经执行过发送动作，禁止切换模式重复发送 | method=%s | stage=%s | code=%s",
+                    method,
+                    result.stage,
+                    result.error_code,
+                )
                 break
             logger.warning(
                 "UIA 模式发送失败，尝试下一模式 | method=%s | stage=%s | code=%s",

@@ -283,7 +283,8 @@ class WindowsSender(BaseMessageSender):
                 target_id,
                 attempt_id,
             )
-            if result.success or not self._allow_mouse_fallback:
+            uia_mode = str(getattr(self._uia_sender, "_send_mode", "") or "")
+            if result.success or not self._allow_mouse_fallback or uia_mode == "auto":
                 self._last_result = result
                 return result
             logger.warning("UIA 发送失败，按配置回退鼠标发送 | receiver=%s", receiver)
@@ -451,7 +452,7 @@ class WindowsSender(BaseMessageSender):
                 self._uia_sender = WindowsUIASender()
             if await self._uia_sender.is_wechat_running():
                 return True
-            if not self._allow_mouse_fallback:
+            if not self._allow_mouse_fallback or getattr(self._uia_sender, "_send_mode", "") == "auto":
                 return False
         return self._find_wechat_window() is not None
 
@@ -465,7 +466,7 @@ class WindowsSender(BaseMessageSender):
 
                 self._uia_sender = WindowsUIASender()
             opened = await self._uia_sender.open_chat(receiver)
-            if opened or not self._allow_mouse_fallback:
+            if opened or not self._allow_mouse_fallback or getattr(self._uia_sender, "_send_mode", "") == "auto":
                 return opened
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(_executor, self._open_chat_sync, receiver)

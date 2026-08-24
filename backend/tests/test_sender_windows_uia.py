@@ -1,5 +1,8 @@
+from types import SimpleNamespace
+
 import pytest
 
+from app.core.send_result import SendResult
 from app.core.sender_windows_uia import WindowsUIASender
 
 
@@ -157,6 +160,19 @@ async def test_background_uia_does_not_call_ensure_window(monkeypatch):
     sender._require_ui_verify = False
     monkeypatch.setattr(
         sender,
+        "_binding_info",
+        lambda: {
+            "selected_account": "wxid_selected_1",
+            "bound_account": "wxid_selected_1",
+            "bound_pid": 5678,
+            "status": "bound",
+            "error_code": "",
+            "error_message": "",
+        },
+    )
+    monkeypatch.setattr(sender, "_window_matches_bound_pid", lambda *_args: True)
+    monkeypatch.setattr(
+        sender,
         "_post_key_without_focus",
         lambda _driver, ctrl=False: driver.input.value_pattern.__setattr__("value", "") or True,
     )
@@ -186,7 +202,18 @@ def test_uia_diagnose_resolves_window_pid_without_sending(monkeypatch):
     sender = WindowsUIASender()
     driver = FakeDiagnosticDriver()
     monkeypatch.setattr(sender, "_get_driver", lambda: driver)
-    monkeypatch.setattr(sender, "_get_bound_pid", lambda: 5678)
+    monkeypatch.setattr(
+        sender,
+        "_binding_info",
+        lambda: {
+            "selected_account": "wxid_selected_1",
+            "bound_account": "wxid_selected_1",
+            "bound_pid": 5678,
+            "status": "bound",
+            "error_code": "",
+            "error_message": "",
+        },
+    )
 
     result = sender._diagnose_sync()
 
@@ -196,3 +223,75 @@ def test_uia_diagnose_resolves_window_pid_without_sending(monkeypatch):
     assert result["window"]["pid"] == 5678
     assert result["current_chat"] == "测试联系人"
     assert result["error"] == ""
+
+
+def test_uia_binding_refuses_to_guess_when_pid_is_unknown(monkeypatch):
+    sender = WindowsUIASender()
+    platform = SimpleNamespace(
+        key_extractor=SimpleNamespace(
+            selected_account=lambda: "wxid_selected_1",
+            bound_account="",
+            bound_pid=None,
+        )
+    )
+    monkeypatch.setattr("app.core.platform.Platform.get", lambda: platform)
+
+    result = sender._binding_info()
+
+    assert result["status"] == "ambiguous_process"
+    assert result["error_code"] == "ambiguous_process"
+
+
+def test_uia_binding_rejects_account_mismatch(monkeypatch):
+    sender = WindowsUIASender()
+    platform = SimpleNamespace(
+        key_extractor=SimpleNamespace(
+            selected_account=lambda: "wxid_selected_1",
+            bound_account="wxid_other_2",
+            bound_pid=5678,
+        )
+    )
+    monkeypatch.setattr("app.core.platform.Platform.get", lambda: platform)
+
+    result = sender._binding_info()
+
+    assert result["status"] == "account_binding_mismatch"
+    assert result["error_code"] == "account_binding_mismatch"
+
+
+def test_auto_selects_foreground_when_background_probe_is_incomplete(monkeypatch):
+    sender = WindowsUIASender()
+    sender._send_mode = "auto"
+    monkeypatch.setattr(
+        sender,
+        "_probe_background_capability",
+        lambda: {
+            "available": False,
+            "reason_code": "background_patterns_incomplete",
+            "reason": "send_button_invoke",
+        },
+    )
+
+    assert sender._candidate_methods() == ["foreground_uia"]
+
+
+def test_auto_does_not_retry_after_send_action(monkeypatch):
+    sender = WindowsUIASender()
+    sender._send_mode = "auto"
+    calls = []
+
+    attempted = SendResult.for_message("你好", "wxid_target", "background_uia")
+    attempted.action_performed = True
+    attempted.fail("ui_verify", "ui_message_not_found", "未找到消息")
+
+    def send_once(*_args):
+        calls.append(True)
+        return attempted
+
+    monkeypatch.setattr(sender, "_candidate_methods", lambda: ["background_uia", "foreground_uia"])
+    monkeypatch.setattr(sender, "_send_text_once", send_once)
+
+    result = sender._send_text_sync_result("你好", "目标", False, "wxid_target")
+
+    assert result is attempted
+    assert calls == [True]

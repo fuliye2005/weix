@@ -254,7 +254,7 @@ class WindowsKeyExtractor(BaseKeyExtractor):
     @property
     def bound_account(self) -> str:
         """Account directory associated with the currently loaded key cache."""
-        return self._bound_account or self._selected_account()
+        return self._bound_account
 
     def selected_account(self) -> str:
         """Return the configured Windows account directory, or empty for auto."""

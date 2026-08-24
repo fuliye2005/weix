@@ -44,20 +44,34 @@ def _try_auto_extract_keys():
                 else bool(valid_keys)
             )
             if valid_keys and has_message_key:
+                bound = False
                 if hasattr(extractor, "bind_process_for_cached_keys"):
                     for pid in extractor.find_wechat_processes():
                         if extractor.bind_process_for_cached_keys(pid):
+                            bound = True
                             break
-                logger.info("密钥已缓存且验证通过，跳过提取")
-                return
-            logger.warning("缓存密钥无法解密当前数据库，删除后重新提取")
-            if hasattr(extractor, "clear_keys"):
-                extractor.clear_keys()
+                else:
+                    bound = True
+                if bound:
+                    logger.info("密钥已缓存、验证通过且已绑定微信进程，跳过提取")
+                    return
+                logger.warning("缓存密钥有效但未绑定到微信主进程，清理后重新提取")
+                if hasattr(extractor, "clear_keys"):
+                    extractor.clear_keys()
+                else:
+                    try:
+                        cache.unlink()
+                    except OSError as exc:
+                        logger.warning(f"删除未绑定密钥缓存失败: {exc}")
             else:
-                try:
-                    cache.unlink()
-                except OSError as exc:
-                    logger.warning(f"删除无效密钥缓存失败: {exc}")
+                logger.warning("缓存密钥无法解密当前数据库，删除后重新提取")
+                if hasattr(extractor, "clear_keys"):
+                    extractor.clear_keys()
+                else:
+                    try:
+                        cache.unlink()
+                    except OSError as exc:
+                        logger.warning(f"删除无效密钥缓存失败: {exc}")
 
         pids = (
             extractor.find_wechat_processes()
@@ -66,6 +80,18 @@ def _try_auto_extract_keys():
         )
         if not pids:
             logger.warning("未找到微信进程，跳过密钥提取")
+            return
+
+        selected_account = (
+            extractor.selected_account()
+            if hasattr(extractor, "selected_account")
+            else ""
+        )
+        if not selected_account and len(pids) > 1:
+            logger.error(
+                "检测到多个微信主进程但没有选定账号，拒绝猜测进程 | pids=%s",
+                pids,
+            )
             return
 
         keys = {}
