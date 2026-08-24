@@ -9,6 +9,7 @@ import ctypes
 import json
 import logging
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -384,7 +385,7 @@ class WindowsSender(BaseMessageSender):
             from app.core.sender_windows_uia import WindowsUIASender
 
             self._uia_sender = WindowsUIASender()
-        send_started_at = int(time.time()) - 2
+        send_started_at = int(time.time())
         result = await self._uia_sender.send_text_result(
             msg,
             receiver,
@@ -392,8 +393,19 @@ class WindowsSender(BaseMessageSender):
             target_id=target_id,
             attempt_id=attempt_id,
         )
+        result.details.setdefault("db_verify_since_ts", send_started_at)
+        result.details.setdefault("verification_target_id", str(target_id or ""))
         if not result.success or not self._verify_after_send:
             return result
+
+        if not target_id:
+            return result.pending(
+                "db_verify",
+                error_code="target_id_required",
+                error_message="数据库验证必须提供目标会话 ID，已禁止跨会话匹配",
+                db_verified=False,
+                ui_verified=result.ui_verified,
+            )
 
         loop = asyncio.get_running_loop()
         verified = await loop.run_in_executor(
@@ -413,6 +425,8 @@ class WindowsSender(BaseMessageSender):
 
         result.pending(
             "db_verify",
+            error_code="db_not_confirmed",
+            error_message="UIA 已完成发送，但目标会话数据库暂未确认",
             db_verified=False,
             ui_verified=result.ui_verified,
         )
@@ -953,6 +967,9 @@ class WindowsSender(BaseMessageSender):
         normalized_msg = WindowsSender._normalize_text(msg)
         if not normalized_msg or reader._sqlite_conn is None:
             return False
+        if not target_id:
+            logger.warning("拒绝无 target_id 的发送回读校验")
+            return False
 
         if reader._has_msg_shard_tables():
             tables = [
@@ -1011,7 +1028,19 @@ class WindowsSender(BaseMessageSender):
 
     @staticmethod
     def _normalize_text(text: str) -> str:
-        return str(text or "").replace("\r\n", "\n").strip()
+        normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+        normalized = re.sub(
+            r"^\s*(?:(?:wxid|gh)_[a-z0-9_-]+|\d+@openim)\s*:\s*(?:\n|$)",
+            "",
+            normalized,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        normalized = "".join(
+            character for character in normalized
+            if character not in "\u200b\u200c\u200d\ufeff"
+        )
+        return " ".join(normalized.split())
 
     # --- 内部判断 ---
 

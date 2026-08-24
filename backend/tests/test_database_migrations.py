@@ -25,6 +25,7 @@ def test_messages_migration_adds_new_log_columns_to_existing_table():
         assert "status" in columns
         assert "reply_to_msg_id" in columns
         assert "attempt_id" in columns
+        assert "content_hash" in columns
         assert "error_message" in columns
         assert "error_stage" in columns
         assert "target_id" in columns
@@ -40,3 +41,4 @@ def test_messages_migration_adds_new_log_columns_to_existing_table():
         }
         assert "ix_messages_direction" in index_names
         assert "ix_messages_status" in index_names
+        assert "ix_messages_content_hash" in index_names

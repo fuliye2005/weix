@@ -24,6 +24,7 @@ class Message(Base):
     status = Column(String(32), nullable=False, default="received", server_default="received", index=True)
     reply_to_msg_id = Column(String(128), index=True)
     attempt_id = Column(String(64), unique=True, index=True)
+    content_hash = Column(String(64), index=True)
     send_method = Column(String(32))
     reply_source = Column(String(32))
     error_stage = Column(String(32))

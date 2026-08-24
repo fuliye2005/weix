@@ -29,6 +29,7 @@ class MessageOut(BaseModel):
     status: str = "received"
     reply_to_msg_id: Optional[str] = None
     attempt_id: str = ""
+    content_hash: str = ""
     send_method: str = ""
     reply_source: str = ""
     error_stage: str = ""

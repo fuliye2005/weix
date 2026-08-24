@@ -49,6 +49,7 @@ async def list_messages(
                 status=m.status,
                 reply_to_msg_id=m.reply_to_msg_id,
                 attempt_id=m.attempt_id or "",
+                content_hash=m.content_hash or "",
                 send_method=m.send_method or "",
                 reply_source=m.reply_source or "",
                 error_stage=m.error_stage or "",

@@ -66,6 +66,12 @@ class SendResult:
         self.success = False
         self.status = "pending_verify"
         self.stage = stage
+        code = details.pop("error_code", "")
+        message = details.pop("error_message", "")
+        if code:
+            self.error_code = str(code)
+        if message:
+            self.error_message = str(message)
         self.details.update(details)
         self.finished_at = time.time()
         return self
@@ -74,6 +80,8 @@ class SendResult:
         self.success = True
         self.status = "sent"
         self.stage = stage
+        self.error_code = ""
+        self.error_message = ""
         self.finished_at = time.time()
         self.details.update(details)
         return self

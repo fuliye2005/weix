@@ -296,3 +296,49 @@ def test_reader_has_recent_self_text_requires_target_v4_table():
         )
         is True
     )
+
+
+def test_reader_has_recent_self_text_rejects_missing_target_id():
+    from app.core.sender_windows import WindowsSender
+
+    class Reader:
+        _sqlite_conn = object()
+
+        def _has_msg_shard_tables(self):
+            raise AssertionError("must reject before scanning tables")
+
+    assert WindowsSender._reader_has_recent_self_text(Reader(), "你好", 1) is False
+
+
+def test_reader_has_recent_self_text_normalizes_group_prefix():
+    from app.core.sender_windows import WindowsSender
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE Msg_group (local_id INTEGER, create_time INTEGER, real_sender_id INTEGER, "
+        "message_content TEXT, local_type INTEGER, status INTEGER, origin_source INTEGER, server_seq INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO Msg_group VALUES (1, 100, 1, ?, 1, 3, 0, 10)",
+        ("wxid_friend:" + chr(10) + "你好" + chr(0x200b),),
+    )
+
+    class Reader:
+        _sqlite_conn = conn
+
+        def _has_msg_shard_tables(self):
+            return True
+
+        def _get_v4_msg_tables(self):
+            return [("Msg_group", "room@chatroom")]
+
+        def _is_self_sent_v4_row(self, _row):
+            return True
+
+        def _decode_message_content(self, content):
+            return str(content or "")
+
+    assert WindowsSender._reader_has_recent_self_text(
+        Reader(), "你好", 90, target_id="room@chatroom"
+    ) is True

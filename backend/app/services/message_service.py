@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import uuid
 from datetime import datetime
@@ -38,6 +39,9 @@ class MessageService:
             status=msg.get("status", "received"),
             reply_to_msg_id=msg.get("reply_to_msg_id"),
             attempt_id=msg.get("attempt_id"),
+            content_hash=msg.get("content_hash") or hashlib.sha256(
+                str(msg.get("content", "") or "").encode("utf-8")
+            ).hexdigest(),
             send_method=msg.get("send_method"),
             reply_source=msg.get("reply_source"),
             error_stage=msg.get("error_stage"),
@@ -80,6 +84,7 @@ class MessageService:
             status=status,
             reply_to_msg_id=reply_to_msg_id or None,
             attempt_id=attempt_id,
+            content_hash=hashlib.sha256(str(content or "").encode("utf-8")).hexdigest(),
             send_method=send_method or None,
             reply_source=reply_source or "manual",
             target_id=target_id,

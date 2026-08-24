@@ -38,6 +38,7 @@ async def test_message_service_tracks_outbound_attempt_lifecycle(tmp_path):
         assert attempt.direction == "outbound"
         assert attempt.status == "generated"
         assert attempt.reply_to_msg_id == "inbound:1"
+        assert len(attempt.content_hash) == 64
 
         updated = await service.update_outbound_attempt(
             attempt.attempt_id,

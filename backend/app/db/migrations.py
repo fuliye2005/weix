@@ -8,6 +8,7 @@ _MESSAGE_COLUMNS: dict[str, str] = {
     "status": "VARCHAR(32) NOT NULL DEFAULT 'received'",
     "reply_to_msg_id": "VARCHAR(128)",
     "attempt_id": "VARCHAR(64)",
+    "content_hash": "VARCHAR(64)",
     "send_method": "VARCHAR(32)",
     "reply_source": "VARCHAR(32)",
     "error_stage": "VARCHAR(32)",
@@ -23,6 +24,7 @@ _MESSAGE_INDEXES: dict[str, tuple[str, bool]] = {
     "ix_messages_status": ("status", False),
     "ix_messages_reply_to_msg_id": ("reply_to_msg_id", False),
     "ix_messages_attempt_id": ("attempt_id", True),
+    "ix_messages_content_hash": ("content_hash", False),
     "ix_messages_target_id": ("target_id", False),
 }
 
