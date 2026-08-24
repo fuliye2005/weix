@@ -1,4 +1,5 @@
 import logging
+import uuid
 from datetime import datetime
 
 from sqlalchemy import select, func
@@ -16,7 +17,7 @@ class MessageService:
         self.session = session
 
     async def save_message(self, msg: dict) -> Message:
-        """Save an incoming message to the database."""
+        """Save an inbound or already-materialized message to the database."""
         result = await self.session.execute(
             select(Message).where(Message.msg_id == msg["msg_id"])
         )
@@ -33,9 +34,84 @@ class MessageService:
             room_id=msg.get("room_id", ""),
             room_name=msg.get("room_name", ""),
             is_group=msg.get("is_group", False),
+            direction=msg.get("direction", "inbound"),
+            status=msg.get("status", "received"),
+            reply_to_msg_id=msg.get("reply_to_msg_id"),
+            attempt_id=msg.get("attempt_id"),
+            send_method=msg.get("send_method"),
+            reply_source=msg.get("reply_source"),
+            error_code=msg.get("error_code"),
+            error_message=msg.get("error_message"),
+            sent_at=msg.get("sent_at"),
+            target_id=msg.get("target_id"),
+            target_name=msg.get("target_name"),
             create_time=msg.get("create_time", datetime.now()),
         )
         self.session.add(record)
+        await self.session.commit()
+        return record
+
+    async def create_outbound_attempt(
+        self,
+        *,
+        content: str,
+        target_id: str,
+        target_name: str = "",
+        is_group: bool = False,
+        reply_to_msg_id: str = "",
+        reply_source: str = "manual",
+        send_method: str = "",
+        status: str = "generated",
+        attempt_id: str | None = None,
+    ) -> Message:
+        """Create the durable record used by one outbound send attempt."""
+        attempt_id = attempt_id or uuid.uuid4().hex
+        record = Message(
+            msg_id=f"outbound:{attempt_id}",
+            msg_type=1,
+            content=content,
+            sender_wxid="",
+            sender_name="",
+            room_id=target_id if is_group else "",
+            room_name=target_name if is_group else "",
+            is_group=is_group,
+            direction="outbound",
+            status=status,
+            reply_to_msg_id=reply_to_msg_id or None,
+            attempt_id=attempt_id,
+            send_method=send_method or None,
+            reply_source=reply_source or "manual",
+            target_id=target_id,
+            target_name=target_name,
+            create_time=datetime.now(),
+        )
+        self.session.add(record)
+        await self.session.commit()
+        return record
+
+    async def update_outbound_attempt(self, attempt_id: str, **changes) -> Message | None:
+        """Update one outbound attempt without creating duplicate log rows."""
+        result = await self.session.execute(
+            select(Message).where(Message.attempt_id == attempt_id)
+        )
+        record = result.scalar_one_or_none()
+        if record is None:
+            logger.warning("出站日志不存在，无法更新 | attempt_id=%s", attempt_id)
+            return None
+
+        allowed = {
+            "status",
+            "send_method",
+            "error_code",
+            "error_message",
+            "sent_at",
+            "target_id",
+            "target_name",
+            "reply_source",
+        }
+        for key, value in changes.items():
+            if key in allowed:
+                setattr(record, key, value)
         await self.session.commit()
         return record
 
