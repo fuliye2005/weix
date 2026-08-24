@@ -129,3 +129,33 @@ def test_uia_diagnose_api_delegates_without_sending(monkeypatch):
 
     assert result["uia_available"] is True
     assert result["window"]["pid"] == 5678
+
+
+def test_restart_command_prefers_project_virtual_environment_on_windows(monkeypatch, tmp_path):
+    project_python = tmp_path / "venv" / "Scripts" / "python.exe"
+    project_python.parent.mkdir(parents=True)
+    project_python.write_bytes(b"")
+
+    monkeypatch.setattr(platform_api.os, "name", "nt")
+    monkeypatch.setattr(platform_api, "get_base_dir", lambda: tmp_path)
+    monkeypatch.setattr(platform_api.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(platform_api.sys, "executable", "C:\\Python\\python.exe")
+    monkeypatch.setattr(platform_api.sys, "argv", ["app\\main.py", "--test"])
+
+    executable, command = platform_api._restart_command()
+
+    assert executable == str(project_python)
+    assert command == [str(project_python), "-m", "app.main", "--test"]
+
+
+def test_restart_command_falls_back_to_current_interpreter(monkeypatch, tmp_path):
+    monkeypatch.setattr(platform_api.os, "name", "nt")
+    monkeypatch.setattr(platform_api, "get_base_dir", lambda: tmp_path)
+    monkeypatch.setattr(platform_api.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(platform_api.sys, "executable", "C:\\Python\\python.exe")
+    monkeypatch.setattr(platform_api.sys, "argv", ["app\\main.py"])
+
+    executable, command = platform_api._restart_command()
+
+    assert executable == "C:\\Python\\python.exe"
+    assert command == ["C:\\Python\\python.exe", "-m", "app.main"]

@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from app.api.auth import verify_token
 from app.config import get_config
 from app.core.platform import Platform
-from app.utils.paths import get_config_dir, get_data_dir
+from app.utils.paths import get_base_dir, get_config_dir, get_data_dir
 
 logger = logging.getLogger(__name__)
 _restart_task: asyncio.Task | None = None
@@ -196,16 +196,33 @@ async def select_account(payload: AccountSelectionRequest):
     }
 
 
+def _restart_command() -> tuple[str, list[str]]:
+    """Return the interpreter and arguments used by the management restart.
+
+    The service is normally launched with the repository virtual environment.
+    A restart must preserve that choice; otherwise a process started from an
+    IDE, launcher, or another Python installation can silently restart into a
+    runtime that does not contain the pinned UIA/pywin32 dependencies.
+    """
+    if getattr(sys, "frozen", False):
+        return sys.executable, [sys.executable, *sys.argv[1:]]
+
+    executable = sys.executable
+    if os.name == "nt":
+        project_python = get_base_dir() / "venv" / "Scripts" / "python.exe"
+        if project_python.is_file():
+            executable = str(project_python)
+
+    return executable, [executable, "-m", "app.main", *sys.argv[1:]]
+
+
 async def _restart_process_after_response() -> None:
     """Replace the current backend process after the HTTP response is sent."""
     await asyncio.sleep(0.8)
-    if getattr(sys, "frozen", False):
-        command = [sys.executable, *sys.argv[1:]]
-    else:
-        command = [sys.executable, "-m", "app.main", *sys.argv[1:]]
+    executable, command = _restart_command()
 
-    logger.warning("收到管理后台重启请求，正在重启后端进程")
-    os.execv(sys.executable, command)
+    logger.warning("收到管理后台重启请求，正在重启后端进程 | python=%s", executable)
+    os.execv(executable, command)
 
 
 @router.post("/restart")
