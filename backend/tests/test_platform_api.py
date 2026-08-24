@@ -39,6 +39,59 @@ class FakeExtractor:
         return {"contact/contact.db": "00" * 32}
 
 
+def test_accounts_api_marks_selected_bound_and_online_account(monkeypatch):
+    class Extractor:
+        bound_account = "wxid_second_2"
+        bound_pid = 222
+
+        def selected_account(self):
+            return "wxid_second_2"
+
+        def get_available_accounts(self):
+            return [
+                {"wxid": "wxid_first_1", "data_dir": ""},
+                {"wxid": "wxid_second_2", "data_dir": ""},
+            ]
+
+    class Sender:
+        async def is_wechat_running(self):
+            return True
+
+    platform = SimpleNamespace(
+        is_windows=True,
+        key_extractor=Extractor(),
+        sender=Sender(),
+    )
+    monkeypatch.setattr(platform_api.Platform, "get", lambda: platform)
+
+    result = asyncio.run(platform_api.list_accounts())
+
+    first, second = result["accounts"]
+    assert result["selected"] == "wxid_second_2"
+    assert result["active"] == "wxid_second_2"
+    assert first["online"] is False
+    assert second["online"] is True
+    assert second["base_wxid"] == "wxid_second"
+
+
+def test_select_account_rejects_unknown_directory_without_saving(monkeypatch):
+    class Extractor:
+        def get_available_accounts(self):
+            return [{"wxid": "wxid_known_1"}]
+
+    platform = SimpleNamespace(is_windows=True, key_extractor=Extractor())
+    saved = []
+    monkeypatch.setattr(platform_api.Platform, "get", lambda: platform)
+    monkeypatch.setattr(platform_api, "_save_selected_account", saved.append)
+
+    result = asyncio.run(
+        platform_api.select_account(platform_api.AccountSelectionRequest(wxid="wxid_missing_9"))
+    )
+
+    assert result["success"] is False
+    assert saved == []
+
+
 def test_contacts_api_uses_isolated_reader(monkeypatch):
     shared_reader = SharedReader()
     platform = SimpleNamespace(

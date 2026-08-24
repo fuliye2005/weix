@@ -117,6 +117,27 @@ class AccountSelectionRequest(BaseModel):
     wxid: str = ""
 
 
+async def _decorate_accounts(platform, extractor, accounts: list[dict]) -> tuple[str, str, bool]:
+    """Add selection, binding, and live-process state to account rows."""
+    selected = extractor.selected_account()
+    active = str(getattr(extractor, "bound_account", "") or "")
+    try:
+        online = bool(await platform.sender.is_wechat_running())
+    except Exception as exc:
+        logger.debug("读取微信在线状态失败: %s", exc)
+        online = False
+
+    selected_lower = str(selected or "").lower()
+    active_lower = active.lower()
+    for account in accounts:
+        wxid = str(account.get("wxid", ""))
+        account["selected"] = bool(selected_lower and wxid.lower() == selected_lower)
+        account["active"] = bool(active_lower and wxid.lower() == active_lower)
+        account["online"] = bool(account["active"] and online)
+        account["base_wxid"] = _account_base_wxid(wxid)
+    return str(selected or ""), active, online
+
+
 def _save_selected_account(wxid: str) -> None:
     """Persist the selected Windows account without replacing other settings."""
     import yaml
@@ -141,13 +162,7 @@ async def list_accounts():
         return {"accounts": [], "selected": "", "active": "", "bound_pid": None}
 
     accounts = extractor.get_available_accounts()
-    selected = extractor.selected_account()
-    active = getattr(extractor, "bound_account", "")
-    for account in accounts:
-        wxid = str(account.get("wxid", ""))
-        account["selected"] = wxid.lower() == selected.lower() if selected else False
-        account["active"] = wxid.lower() == str(active).lower() if active else False
-        account["base_wxid"] = _account_base_wxid(wxid)
+    selected, active, _online = await _decorate_accounts(platform, extractor, accounts)
 
     active_account = next((item for item in accounts if item.get("active")), None)
     if active_account:
@@ -408,6 +423,7 @@ async def platform_status():
     accounts = []
     if hasattr(extractor, "get_available_accounts"):
         accounts = extractor.get_available_accounts()
+        selected, active, _online = await _decorate_accounts(platform, extractor, accounts)
 
     return {
         "platform": platform.name,

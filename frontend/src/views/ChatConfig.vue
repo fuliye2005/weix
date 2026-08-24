@@ -24,8 +24,10 @@
               <div class="account-option">
                 <div class="account-option-title">
                   {{ account.nickname || account.alias || account.base_wxid || account.wxid }}
-                  <el-tag v-if="account.active" size="small" type="success">当前运行</el-tag>
+                  <el-tag v-if="account.online" size="small" type="success">在线</el-tag>
+                  <el-tag v-else-if="account.active" size="small" type="warning">已绑定</el-tag>
                   <el-tag v-else-if="account.selected" size="small" type="warning">配置中</el-tag>
+                  <el-tag v-else size="small" type="info">离线</el-tag>
                 </div>
                 <div class="account-option-detail">
                   微信号：{{ account.alias || '未读取' }} · wxid：{{ account.base_wxid || account.wxid }}
