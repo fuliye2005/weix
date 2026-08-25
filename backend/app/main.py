@@ -259,9 +259,16 @@ async def lifespan(app: FastAPI):
     _pipeline = None
     setup_logging()
     if sys.platform == "win32":
-        from app.core.windows_runtime import assert_windows_runtime
+        if getattr(sys, "frozen", False):
+            # The packaged runtime already contains the validated UIA wheels.
+            # Re-importing every UIA package here can block before HTTP startup
+            # while comtypes regenerates its cache; the sender still imports UIA
+            # lazily when an account operation actually needs it.
+            logger.info("PyInstaller 发布包已携带 UIA 运行时，跳过源码环境路径校验")
+        else:
+            from app.core.windows_runtime import assert_windows_runtime
 
-        assert_windows_runtime()
+            assert_windows_runtime()
     get_config()
     await init_database()
     _start_auto_extract_keys_background()
