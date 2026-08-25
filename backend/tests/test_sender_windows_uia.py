@@ -432,7 +432,7 @@ def test_search_open_requires_chat_input_after_title_match(monkeypatch):
     monkeypatch.setattr(
         driver,
         "_collect_results",
-        lambda _keyword: [{"cell": cell, "name": "文件传输助手", "section": "联系人"}],
+        lambda _keyword, **_kwargs: [{"cell": cell, "name": "文件传输助手", "section": "联系人"}],
         raising=False,
     )
     monkeypatch.setattr(sender, "_ensure_foreground_navigation", lambda value: value)
@@ -442,6 +442,67 @@ def test_search_open_requires_chat_input_after_title_match(monkeypatch):
 
     assert opened is False
     assert sender._last_navigation_error["error_code"] == "chat_open_verification_failed"
+
+
+def test_search_retries_transient_empty_snapshot(monkeypatch):
+    sender = WindowsUIASender()
+    sender._uia_search_retries = 2
+    sender._uia_search_settle = 0.5
+    driver = FakeDriver()
+    cell = FakeSession("测试联系人", "search_item_1")
+    calls = []
+
+    monkeypatch.setattr(sender, "_set_text_without_mouse", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(sender, "_ensure_foreground_navigation", lambda value: value)
+    monkeypatch.setattr(sender, "_invoke_without_mouse", lambda _control: True)
+    monkeypatch.setattr(
+        driver,
+        "_search_box",
+        lambda *_args, **_kwargs: driver.input,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        driver,
+        "_collect_results",
+        lambda _keyword, **_kwargs: calls.append(True)
+        or ([] if len(calls) == 1 else [{"cell": cell, "name": "测试联系人", "section": "联系人"}]),
+        raising=False,
+    )
+
+    opened = sender._open_chat_without_mouse(
+        driver,
+        "测试联系人",
+        False,
+        background_mode=False,
+    )
+
+    assert opened is True
+    assert len(calls) == 2
+
+
+def test_search_does_not_fallback_to_unsearchable_target_id(monkeypatch):
+    sender = WindowsUIASender()
+    driver = FakeDriver()
+    attempted = []
+
+    monkeypatch.setattr(sender, "_ensure_driver_window", lambda _method=None: driver)
+    monkeypatch.setattr(
+        sender,
+        "_open_chat_without_mouse",
+        lambda _driver, keyword, *_args, **_kwargs: attempted.append(keyword) or False,
+    )
+
+    result = sender._send_text_once(
+        "正文",
+        "芙莉叶",
+        False,
+        "wxid_ybtkerfcizd422",
+        "foreground_uia",
+    )
+
+    assert result.success is False
+    assert result.stage == "search"
+    assert attempted == ["芙莉叶"]
 
 
 def test_uia_binding_refuses_to_guess_when_pid_is_unknown(monkeypatch):

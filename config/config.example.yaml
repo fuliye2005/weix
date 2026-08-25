@@ -77,6 +77,9 @@ windows_sender:
   require_ui_verify: true
   input_verify_timeout: 3.0
   ui_verify_timeout: 4.0
+  # UIA 搜索结果可能短暂为空；只重试搜索，不重复发送正文
+  uia_search_retries: 3
+  uia_search_settle: 2.5
   click_x_ratio: 0.5
   click_y_ratio: 0.88
   park_after_send: false

@@ -152,6 +152,16 @@ class WindowsUIASender:
         self._input_verify_timeout = float(win_cfg.get("input_verify_timeout", 3.0))
         self._ui_verify_timeout = float(win_cfg.get("ui_verify_timeout", 4.0))
         self._require_ui_verify = bool(win_cfg.get("require_ui_verify", True))
+        try:
+            self._uia_search_retries = max(1, int(win_cfg.get("uia_search_retries", 3)))
+        except (TypeError, ValueError):
+            self._uia_search_retries = 3
+        try:
+            self._uia_search_settle = max(
+                0.5, float(win_cfg.get("uia_search_settle", 2.5))
+            )
+        except (TypeError, ValueError):
+            self._uia_search_settle = 2.5
         self._background_post_message = bool(
             win_cfg.get("background_post_message", False)
         )
@@ -561,7 +571,79 @@ class WindowsUIASender:
             return True
         except Exception as exc:
             logger.debug("UIA 无鼠标写入文本失败: %s", exc)
+        return False
+
+    @staticmethod
+    def _is_searchable_identifier(value: Any) -> bool:
+        """Return whether a value is suitable for Weixin's visible search box."""
+        text = str(value or "").strip().casefold()
+        if not text:
             return False
+        if text.startswith("wxid_"):
+            return False
+        if text.endswith("@chatroom"):
+            return False
+        return True
+
+    def _collect_search_results_with_retry(
+        self,
+        driver: Any,
+        search_box: Any,
+        keyword: str,
+        is_group: bool,
+        background: bool = False,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Retry transient empty/invalid UIA search snapshots without clicking."""
+        attempts: list[dict[str, Any]] = []
+        for attempt in range(1, self._uia_search_retries + 1):
+            written = self._set_text_without_mouse(
+                driver,
+                search_box,
+                keyword,
+                allow_focus_fallback=not background,
+            )
+            if not written:
+                attempts.append({"attempt": attempt, "written": False, "count": 0})
+                continue
+
+            time.sleep(0.8 if attempt == 1 else 0.4)
+            try:
+                results = driver._collect_results(
+                    keyword,
+                    settle=self._uia_search_settle,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "UIA 搜索结果快照读取失败 | keyword=%s | attempt=%s | error=%s",
+                    keyword,
+                    attempt,
+                    exc,
+                )
+                results = []
+
+            if is_group:
+                group_results = [
+                    item for item in results
+                    if (item.get("section") or "") == "群聊"
+                ]
+                if group_results:
+                    results = group_results
+                else:
+                    results = [
+                        item for item in results
+                        if item.get("name") == keyword
+                        and (item.get("section") or "") in {"最常使用", "最近使用"}
+                    ]
+
+            attempts.append({
+                "attempt": attempt,
+                "written": True,
+                "count": len(results),
+            })
+            if results:
+                return results, attempts
+
+        return [], attempts
 
     def _open_chat_without_mouse(
         self,
@@ -588,29 +670,22 @@ class WindowsUIASender:
             keywords = [keyword]
         results = []
         used_keyword = keyword
+        search_attempts: list[dict[str, Any]] = []
         for candidate in keywords:
-            if not self._set_text_without_mouse(
-                driver,
-                search_box,
-                candidate,
-                allow_focus_fallback=not background,
-            ):
-                continue
-            time.sleep(0.8)
-            results = driver._collect_results(candidate)
-            if is_group:
-                group_results = [
-                    item for item in results
-                    if (item.get("section") or "") == "群聊"
-                ]
-                if group_results:
-                    results = group_results
-                else:
-                    results = [
-                        item for item in results
-                        if item.get("name") == candidate
-                        and (item.get("section") or "") in {"最常使用", "最近使用"}
-                    ]
+            candidate_results, candidate_attempts = (
+                self._collect_search_results_with_retry(
+                    driver,
+                    search_box,
+                    candidate,
+                    is_group,
+                    background=background,
+                )
+            )
+            search_attempts.extend(
+                {"keyword": candidate, **attempt}
+                for attempt in candidate_attempts
+            )
+            results = candidate_results
             if results:
                 used_keyword = candidate
                 break
@@ -619,6 +694,8 @@ class WindowsUIASender:
             self._last_navigation_error = {
                 "error_code": "search_result_not_found",
                 "error_message": f"搜索未找到目标会话: {used_keyword}",
+                "searched_keywords": list(keywords),
+                "search_attempts": search_attempts,
             }
             return False
 
@@ -1333,7 +1410,12 @@ class WindowsUIASender:
                     is_group,
                     background_mode=background,
                 )
-                if not opened and target_id and target_id != receiver:
+                if (
+                    not opened
+                    and target_id
+                    and target_id != receiver
+                    and self._is_searchable_identifier(target_id)
+                ):
                     opened = self._open_chat_without_mouse(
                         driver,
                         target_id,
