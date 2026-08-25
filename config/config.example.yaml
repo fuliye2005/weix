@@ -63,8 +63,8 @@ macos_sender:
 
 windows_sender:
   method: uia
-  # 先尝试后台 UIA；目标不在可见会话或后台 Pattern 不完整时，自动使用前台 UIA
-  send_mode: auto
+  # 生产默认走前台 UIA：允许短暂激活窗口，但不移动鼠标、不使用坐标点击
+  send_mode: foreground_uia
   background_mode: false
   allow_foreground_activation: true
   # 窄窗口时通过 Win32 ShowWindow 恢复完整导航布局，不执行鼠标或坐标点击
@@ -72,8 +72,8 @@ windows_sender:
   allow_mouse_fallback: false
   # 只有显式设置 enter/ctrl_enter 才允许按键兜底，默认只调用真实发送按钮 Pattern
   send_key_fallback: none
-  # UIA 找到发送按钮后可投递窗口消息，不移动真实鼠标、不抢键盘
-  background_post_message: true
+  # 禁止使用基于按钮坐标的窗口消息兜底；只接受真实 UIA Pattern 调用
+  background_post_message: false
   require_ui_verify: true
   input_verify_timeout: 3.0
   ui_verify_timeout: 4.0

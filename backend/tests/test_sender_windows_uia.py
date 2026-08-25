@@ -159,6 +159,20 @@ class FakeVisibleDriver(FakeDriver):
         return self._session_list
 
 
+def test_uia_defaults_fail_closed_for_non_uia_fallbacks(monkeypatch):
+    monkeypatch.setattr(
+        "app.core.sender_windows_uia.get_config",
+        lambda: SimpleNamespace(windows_sender={}),
+    )
+
+    sender = WindowsUIASender()
+
+    assert sender._send_mode == "foreground_uia"
+    assert sender._background_post_message is False
+    assert sender._send_key_fallback == "none"
+    assert sender._require_ui_verify is True
+
+
 @pytest.mark.asyncio
 async def test_uia_sender_writes_text_without_click(monkeypatch):
     sender = WindowsUIASender()
@@ -227,7 +241,7 @@ async def test_background_uia_uses_posted_button_message_without_input_injection
     assert driver.input.focused is False
 
 
-def test_foreground_uia_uses_posted_button_after_false_positive_pattern(monkeypatch):
+def test_foreground_uia_never_uses_posted_button_message(monkeypatch):
     sender = WindowsUIASender()
     sender._send_mode = "foreground_uia"
     sender._background_mode = False
@@ -239,11 +253,13 @@ def test_foreground_uia_uses_posted_button_after_false_positive_pattern(monkeypa
     monkeypatch.setattr(sender, "_ensure_driver_window", lambda _method=None: driver)
     monkeypatch.setattr(sender, "_find_send_button", lambda *_args: FakeSendButton())
 
-    def post_button(_driver, _button):
-        driver.input.value_pattern.value = ""
-        return True, "PostMessage:WM_LBUTTON"
-
-    monkeypatch.setattr(sender, "_post_button_message_without_mouse", post_button)
+    monkeypatch.setattr(
+        sender,
+        "_post_button_message_without_mouse",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("foreground UIA must not use coordinate-derived window messages")
+        ),
+    )
 
     result = sender._send_text_sync_result(
         "前台无坐标发送",
@@ -252,9 +268,9 @@ def test_foreground_uia_uses_posted_button_after_false_positive_pattern(monkeypa
         "wxid_target",
     )
 
-    assert result.success is True
+    assert result.success is False
     assert result.method == "foreground_uia"
-    assert result.details["invoke_attempts"][-1] == "PostMessage:WM_LBUTTON"
+    assert result.error_code == "send_not_accepted"
     assert driver.input.focused is True
 
 

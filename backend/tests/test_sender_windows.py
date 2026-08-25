@@ -9,6 +9,7 @@ import sqlite3
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pyautogui
@@ -65,6 +66,20 @@ def _mock_window(sender, window=None):
         window = FakeWindow()
     sender._find_wechat_window = MagicMock(return_value=window)
     return window
+
+
+def test_windows_sender_defaults_to_uia_without_mouse_fallback(monkeypatch):
+    monkeypatch.setattr(
+        "app.core.sender_windows.get_config",
+        lambda: SimpleNamespace(windows_sender={}),
+    )
+
+    from app.core.sender_windows import WindowsSender
+
+    sender = WindowsSender()
+
+    assert sender._method == "uia"
+    assert sender._allow_mouse_fallback is False
 
 
 @pytest.mark.asyncio

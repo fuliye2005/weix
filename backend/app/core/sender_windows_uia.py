@@ -153,7 +153,7 @@ class WindowsUIASender:
         self._ui_verify_timeout = float(win_cfg.get("ui_verify_timeout", 4.0))
         self._require_ui_verify = bool(win_cfg.get("require_ui_verify", True))
         self._background_post_message = bool(
-            win_cfg.get("background_post_message", True)
+            win_cfg.get("background_post_message", False)
         )
         self._ensure_full_layout = bool(win_cfg.get("ensure_full_layout", True))
         self._last_result: SendResult | None = None
@@ -1524,13 +1524,12 @@ class WindowsUIASender:
                     invoke_attempts=list(invoke_attempts),
                 )
 
-            # The tested custom Qt button exposes a reliable UIA rectangle but
-            # its Invoke/Legacy actions can be false positives. Posting the
-            # button's own mouse messages to the UIA-bound main window keeps
-            # the physical cursor and keyboard focus untouched. This is also
-            # the final no-input fallback for foreground UIA.
+            # The experimental background mode may use the button's own
+            # window messages when explicitly enabled. The production
+            # foreground UIA path never derives a click from a rectangle.
             if (
-                not draft_cleared
+                background
+                and not draft_cleared
                 and button is not None
                 and self._background_post_message
                 and not invoke_method.startswith("key:")

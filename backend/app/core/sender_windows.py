@@ -188,8 +188,8 @@ class WindowsSender(BaseMessageSender):
     def __init__(self):
         config = get_config()
         win_cfg = config.windows_sender if hasattr(config, "windows_sender") else {}
-        self._method = str(win_cfg.get("method", "mouse")).strip().lower()
-        self._allow_mouse_fallback = bool(win_cfg.get("allow_mouse_fallback", True))
+        self._method = str(win_cfg.get("method", "uia")).strip().lower()
+        self._allow_mouse_fallback = bool(win_cfg.get("allow_mouse_fallback", False))
         self._uia_sender = None
         self._type_delay = win_cfg.get("type_delay", 0.3)
         self._window_activate_delay = win_cfg.get("window_activate_delay", 0.5)
