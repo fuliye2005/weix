@@ -149,6 +149,15 @@ class WindowsUIASender:
         ).strip().lower()
         if self._send_key_fallback not in {"none", "enter", "ctrl_enter"}:
             self._send_key_fallback = "none"
+        # Some Weixin 4.x builds expose Invoke/Legacy actions that report
+        # success without activating the custom Qt button.  This explicit
+        # fallback focuses the UIA-discovered button and invokes its default
+        # keyboard action; it is foreground-only and never uses coordinates.
+        self._send_button_key_fallback = str(
+            win_cfg.get("send_button_key_fallback", "none") or "none"
+        ).strip().lower()
+        if self._send_button_key_fallback not in {"none", "enter", "ctrl_enter"}:
+            self._send_button_key_fallback = "none"
         self._input_verify_timeout = float(win_cfg.get("input_verify_timeout", 3.0))
         self._ui_verify_timeout = float(win_cfg.get("ui_verify_timeout", 4.0))
         self._require_ui_verify = bool(win_cfg.get("require_ui_verify", True))
@@ -960,6 +969,38 @@ class WindowsUIASender:
         return False, ""
 
     @staticmethod
+    def _invoke_focused_button_key(
+        control: Any,
+        fallback: str,
+    ) -> tuple[bool, str]:
+        """Invoke a UIA-discovered send button through its focused default action.
+
+        This is intentionally limited to foreground UIA.  It does not click a
+        rectangle, and background UIA must not inject keyboard input or change
+        the user's global focus state.
+        """
+        if fallback not in {"enter", "ctrl_enter"}:
+            return False, ""
+        try:
+            if hasattr(control, "IsEnabled") and not bool(control.IsEnabled):
+                return False, ""
+            if not control.SetFocus():
+                return False, ""
+
+            import uiautomation as auto
+
+            keys = "{Ctrl}{Enter}" if fallback == "ctrl_enter" else "{Enter}"
+            auto.SendKeys(keys, waitTime=0.1)
+            return True, f"button_key:{fallback}"
+        except Exception as exc:
+            logger.debug(
+                "UIA 发送按钮键盘兜底失败 | fallback=%s | error=%s",
+                fallback,
+                exc,
+            )
+            return False, ""
+
+    @staticmethod
     def _post_button_message_without_mouse(
         driver: Any,
         control: Any,
@@ -1634,6 +1675,29 @@ class WindowsUIASender:
                         result, background_state or {}, "after_post_message"
                     ):
                         return result
+                    draft_cleared = self._wait_input_empty(input_control)
+
+            # Weixin 4.1.12.26 can expose a real, enabled send button whose
+            # Invoke/Legacy patterns return success but do not consume the
+            # draft.  Focusing that same UIA element and pressing its explicit
+            # default key invokes the button itself, independent of the chat
+            # input's Enter/Ctrl+Enter preference.  Never do this in background
+            # mode because it would inject keyboard input into the desktop.
+            if (
+                not draft_cleared
+                and not background
+                and button is not None
+                and self._send_button_key_fallback != "none"
+            ):
+                invoked, fallback_method = self._invoke_focused_button_key(
+                    button,
+                    self._send_button_key_fallback,
+                )
+                if invoked:
+                    invoke_attempts.append(fallback_method)
+                    result.action_performed = True
+                    result.details["invoke_attempts"] = list(invoke_attempts)
+                    result.details["invoke_method"] = " -> ".join(invoke_attempts)
                     draft_cleared = self._wait_input_empty(input_control)
 
             if not draft_cleared:

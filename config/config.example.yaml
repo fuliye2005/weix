@@ -72,6 +72,9 @@ windows_sender:
   allow_mouse_fallback: false
   # 只有显式设置 enter/ctrl_enter 才允许按键兜底，默认只调用真实发送按钮 Pattern
   send_key_fallback: none
+  # 微信 4.x 的按钮 Pattern 可能返回成功但不执行；显式聚焦按钮后触发其默认动作
+  # 这是前台 UIA 兜底，不移动鼠标、不使用坐标；后台 UIA 永不使用此选项
+  send_button_key_fallback: enter
   # 禁止使用基于按钮坐标的窗口消息兜底；只接受真实 UIA Pattern 调用
   background_post_message: false
   require_ui_verify: true

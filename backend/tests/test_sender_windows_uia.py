@@ -64,6 +64,19 @@ class FakeSendButton:
         return self.legacy_pattern
 
 
+class FakeButtonKeySendButton(FakeSendButton):
+    IsEnabled = True
+
+    def __init__(self, input_control):
+        super().__init__()
+        self.input_control = input_control
+        self.focused = False
+
+    def SetFocus(self):
+        self.focused = True
+        return True
+
+
 class FakeFallbackSendButton:
     def __init__(self, input_control):
         self.input_control = input_control
@@ -170,6 +183,7 @@ def test_uia_defaults_fail_closed_for_non_uia_fallbacks(monkeypatch):
     assert sender._send_mode == "foreground_uia"
     assert sender._background_post_message is False
     assert sender._send_key_fallback == "none"
+    assert sender._send_button_key_fallback == "none"
     assert sender._require_ui_verify is True
 
 
@@ -272,6 +286,41 @@ def test_foreground_uia_never_uses_posted_button_message(monkeypatch):
     assert result.method == "foreground_uia"
     assert result.error_code == "send_not_accepted"
     assert driver.input.focused is True
+
+
+def test_foreground_uia_uses_explicit_focused_button_key_fallback(monkeypatch):
+    sender = WindowsUIASender()
+    sender._send_mode = "foreground_uia"
+    sender._send_button_key_fallback = "enter"
+    sender._require_ui_verify = False
+    sender._input_verify_timeout = 0.01
+    driver = FakeDriver()
+    button = FakeButtonKeySendButton(driver.input)
+
+    monkeypatch.setattr(sender, "_ensure_driver_window", lambda _method=None: driver)
+    monkeypatch.setattr(sender, "_find_send_button", lambda *_args: button)
+    monkeypatch.setattr(sender, "_invoke_control", lambda _control: (True, "InvokePattern"))
+    monkeypatch.setattr(
+        "uiautomation.SendKeys",
+        lambda keys, **_kwargs: (
+            driver.input.value_pattern.__setattr__("value", "")
+            if keys == "{Enter}"
+            else None
+        ),
+    )
+
+    result = sender._send_text_once(
+        "按钮键盘兜底",
+        "测试联系人",
+        False,
+        "wxid_target",
+        "foreground_uia",
+    )
+
+    assert result.success is True
+    assert button.focused is True
+    assert result.details["invoke_attempts"][-1] == "button_key:enter"
+    assert result.draft_cleared is True
 
 
 @pytest.mark.asyncio

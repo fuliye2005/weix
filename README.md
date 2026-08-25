@@ -101,14 +101,16 @@ windows_sender:
   ensure_full_layout: true
   allow_mouse_fallback: false
   send_key_fallback: none
+  # Weixin 4.x 按钮 Pattern 可能返回成功但不消费正文；显式聚焦真实按钮后触发其默认动作
+  send_button_key_fallback: enter
   require_ui_verify: true
   verify_after_send: true
   pending_verify_retries: 2
   park_after_send: false
 ```
 
-`foreground_uia` 只通过 UIA 控件树定位会话、写入输入框，并调用发送按钮的 `InvokePattern`、`LegacyIAccessible.DoDefaultAction` 或明确配置的 Pattern；
-不自动回退鼠标、坐标点击或键盘。`background_uia` 仍可作为实验模式，但必须先通过后台 Pattern 能力检测，并且不能改变前台窗口、键盘焦点或鼠标位置。
+`foreground_uia` 只通过 UIA 控件树定位会话、写入输入框，并调用发送按钮的 `InvokePattern`、`LegacyIAccessible.DoDefaultAction` 或明确配置的按钮键盘兜底；
+不自动回退鼠标或坐标点击。`send_button_key_fallback` 是对已找到的真实发送按钮执行默认动作，不是向聊天输入框盲发 Enter；`background_uia` 永不使用此键盘兜底，必须先通过后台 Pattern 能力检测，并且不能改变前台窗口、键盘焦点或鼠标位置。
 两条 UIA 路径都必须先通过所选账号的 PID 绑定校验。
 当前微信版本的 `InvokePattern` 可能返回调用成功而不真正发送，因此不能单独作为成功依据。
 
