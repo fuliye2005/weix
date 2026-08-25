@@ -149,6 +149,14 @@ scripts\start.bat
 
 首次运行会**自动**从本机微信进程内存中提取数据库解密密钥，保存到 `data/all_keys.json`。如果自动提取失败，可手动设置环境变量 `WEIX_WECHAT_DB_KEY`（64 位十六进制密钥）。
 
+### Windows 一键发布包
+
+在项目根目录运行 `scripts\build_backend.bat`，构建完成后将整个 `dist\Weix` 文件夹复制到目标电脑，双击其中的 `Weix.exe` 即可启动。也可以双击同目录的 `scripts\start_weix.bat`（如果已复制该脚本）。
+
+打包启动器会自动启动后端、加载内置的前端管理页面，并打开浏览器访问 `http://127.0.0.1:8000`。首次运行会从内置模板创建 `config\config.yaml`，请先编辑该文件填写 API Key、管理员密码和微信账号相关配置；后续配置可在管理界面调整。打包版不使用开发服务器的 `http://127.0.0.1:5173`。
+
+默认发布包不包含本机数据库、密钥和聊天记录。若只制作当前电脑使用的便携包，可在构建前执行 `set WEIX_BUNDLE_RUNTIME_DATA=1`，但不要把这种包分发给他人。
+
 ## 管理后台
 
 访问 http://localhost:5173，默认用户名/密码在 `config/config.yaml` 中配置（从 `config/config.example.yaml` 复制后修改）。

@@ -14,23 +14,13 @@ if not exist "Weix.exe" (
     exit /b 1
 )
 
-REM 检查配置文件是否存在
-if not exist "config\config.yaml" (
-    echo 错误: 找不到配置文件 config\config.yaml
-    echo 请确保 config 目录存在于 Weix.exe 同级目录
-    pause
-    exit /b 1
-)
-
-REM 检查数据目录是否存在
-if not exist "data" (
-    echo 创建数据目录...
-    mkdir data
-)
+REM 配置和数据目录会在 Weix.exe 首次启动时自动创建。
+if not exist "config" mkdir config
+if not exist "data" mkdir data
 
 echo 正在启动服务...
-echo 启动后请访问: http://localhost:8000
+echo 管理界面: http://127.0.0.1:8000
 echo.
 
-REM 使用 cmd /k 保持窗口打开，即使程序崩溃也能看到错误信息
-cmd /k "Weix.exe & if errorlevel 1 (echo. & echo ========================================== & echo  启动失败！请检查上述错误信息 & echo ==========================================)"
+REM 启动器自身包含 GUI、后端和打包后的前端静态资源。
+start "Weix" /D "%~dp0" "Weix.exe"

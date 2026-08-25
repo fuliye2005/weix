@@ -30,6 +30,7 @@ SERVER_PORT = 8000
 HEALTH_URL = f"http://{SERVER_HOST}:{SERVER_PORT}/api/health"
 BROWSER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
 HEALTH_CHECK_INTERVAL_MS = 2000
+AUTO_START = True
 
 
 class ServiceState(Enum):
@@ -111,6 +112,15 @@ _server_thread = None
 _server_error = ""
 
 
+def _runtime_log_path() -> Path:
+    """Return a writable log path for source and PyInstaller launches."""
+    if getattr(sys, "frozen", False):
+        root = Path(sys.executable).resolve().parent
+    else:
+        root = Path(__file__).resolve().parent.parent
+    return root / "logs" / "launcher.log"
+
+
 def _fix_none_streams():
     """PyInstaller --windowed 模式下 sys.stdout/stderr 为 None, 需要修复。"""
     import io
@@ -118,6 +128,42 @@ def _fix_none_streams():
         sys.stdout = io.StringIO()
     if sys.stderr is None:
         sys.stderr = io.StringIO()
+
+
+def _install_runtime_file_logging():
+    """Keep startup failures available after a GUI process loses its console."""
+    _fix_none_streams()
+    try:
+        log_path = _runtime_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        root_logger = logging.getLogger()
+        if not any(
+            getattr(handler, "_weix_runtime_file", False)
+            for handler in root_logger.handlers
+        ):
+            handler = logging.FileHandler(log_path, encoding="utf-8")
+            handler.setLevel(logging.INFO)
+            handler.setFormatter(logging.Formatter(
+                "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            ))
+            handler._weix_runtime_file = True
+            handler._weix_preserve = True
+            root_logger.addHandler(handler)
+        root_logger.setLevel(logging.INFO)
+    except Exception:
+        # A read-only install directory should not prevent the GUI from opening.
+        pass
+
+
+def _existing_service_is_healthy() -> bool:
+    """Return whether another Weix service already owns the management port."""
+    try:
+        request = urllib.request.Request(HEALTH_URL, method="GET")
+        with urllib.request.urlopen(request, timeout=0.8) as response:
+            return response.status == 200
+    except Exception:
+        return False
 
 
 def _run_uvicorn(host: str, port: int):
@@ -144,6 +190,7 @@ def _run_uvicorn(host: str, port: int):
             port=port,
             log_level="info",
             access_log=False,
+            log_config=None,
         )
         _server = uvicorn.Server(config)
 
@@ -157,6 +204,14 @@ def _run_uvicorn(host: str, port: int):
 
         log.info("正在启动 uvicorn 服务 (%s:%d)...", host, port)
         loop.run_until_complete(_server.serve())
+        log.info(
+            "uvicorn serve 已返回 | started=%s | should_exit=%s | frozen=%s | base=%s | meipass=%s",
+            _server.started,
+            _server.should_exit,
+            getattr(sys, "frozen", False),
+            Path(sys.executable).resolve().parent,
+            getattr(sys, "_MEIPASS", ""),
+        )
 
         # 清理事件循环中的残留任务
         _cleanup_loop(loop)
@@ -289,10 +344,21 @@ class MainWindow(QMainWindow):
     def _on_start(self):
         global _server_thread, _server_error
 
+        if self._state in {ServiceState.STARTING, ServiceState.RUNNING}:
+            return
+
         self._log_text.clear()
         self._startup_timer_count = 0
         _server_error = ""
         self._log("正在启动 Weix 服务...")
+
+        if _existing_service_is_healthy():
+            self._log("检测到已有管理服务，跳过重复启动并打开管理界面")
+            self._update_ui_state(ServiceState.RUNNING)
+            self._statusbar.showMessage(f"已有服务运行中 -- {BROWSER_URL}")
+            QTimer.singleShot(200, self._open_browser)
+            return
+
         if sys.platform == "win32":
             self._log(f"当前进程 UAC 提升: {'是' if _is_admin() else '否'}")
         self._update_ui_state(ServiceState.STARTING)
@@ -486,6 +552,8 @@ def main():
     if getattr(sys, 'frozen', False):
         os.chdir(Path(sys.executable).parent)
 
+    _install_runtime_file_logging()
+
     app = QApplication(sys.argv)
     app.setApplicationName("Weix")
     app.setStyle("Fusion")
@@ -507,6 +575,8 @@ def main():
 
     window = MainWindow()
     window.show()
+    if AUTO_START:
+        QTimer.singleShot(250, window._on_start)
     sys.exit(app.exec())
 
 

@@ -12,12 +12,55 @@ set "DIST_DIR=%PROJECT_DIR%\dist"
 set "BUILD_DIR=%PROJECT_DIR%\build"
 set "FRONTEND_DIST=%PROJECT_DIR%\frontend\dist"
 set "BACKEND_DIR=%PROJECT_DIR%\backend"
+set "PYTHON_EXE=%PROJECT_DIR%\venv\Scripts\python.exe"
+set "PACKAGE_CONFIG=%BUILD_DIR%\package_config"
+set "PACKAGE_DATA=%BUILD_DIR%\package_data"
+set "PYTHONPATH=%BACKEND_DIR%;%PYTHONPATH%"
 
 cd /d "%PROJECT_DIR%" || exit /b 1
 
 echo ==========================================
 echo  Weix Windows Build
 echo ==========================================
+
+if not exist "%PYTHON_EXE%" (
+    echo [ERROR] Project Python 3.12 runtime not found: %PYTHON_EXE%
+    echo        Run scripts\setup.bat first.
+    pause
+    exit /b 1
+)
+
+echo [CHECK] Validating Windows UIA runtime...
+"%PYTHON_EXE%" -c "from app.core.windows_runtime import assert_windows_runtime; assert_windows_runtime()"
+if errorlevel 1 (
+    echo [ERROR] UIA runtime validation failed. Build stopped.
+    pause
+    exit /b 1
+)
+
+if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
+mkdir "%PACKAGE_CONFIG%"
+mkdir "%PACKAGE_DATA%"
+copy /y "%PROJECT_DIR%\config\config.example.yaml" "%PACKAGE_CONFIG%\config.example.yaml" >nul
+if exist "%PROJECT_DIR%\data\.gitkeep" copy /y "%PROJECT_DIR%\data\.gitkeep" "%PACKAGE_DATA%\.gitkeep" >nul
+
+REM Default package contains only the template, never local DB, keys, or chat logs.
+REM For a private portable package, run: set WEIX_BUNDLE_RUNTIME_DATA=1
+if /I "%WEIX_BUNDLE_RUNTIME_DATA%"=="1" (
+    echo [INFO] Including local config and data for a private portable package.
+    rmdir /s /q "%PACKAGE_CONFIG%" >nul 2>nul
+    rmdir /s /q "%PACKAGE_DATA%" >nul 2>nul
+    xcopy "%PROJECT_DIR%\config" "%PACKAGE_CONFIG%\" /E /I /H /Y >nul
+    if errorlevel 4 (
+        echo [ERROR] Could not copy config.
+        exit /b 1
+    )
+    xcopy "%PROJECT_DIR%\data" "%PACKAGE_DATA%\" /E /I /H /Y >nul
+    if errorlevel 4 (
+        echo [ERROR] Could not copy data.
+        exit /b 1
+    )
+)
 
 REM 0. Create default .env if needed.
 if not exist "%PROJECT_DIR%\.env" (
@@ -30,11 +73,9 @@ if not exist "%PROJECT_DIR%\.env" (
 REM 1. Build frontend.
 echo [1/4] Building frontend...
 cd /d "%PROJECT_DIR%\frontend" || exit /b 1
-if exist "%PROJECT_DIR%\frontend\node_modules" (
-    echo Removing stale frontend node_modules...
-    rmdir /s /q "%PROJECT_DIR%\frontend\node_modules" >nul 2>nul
+if not exist "%PROJECT_DIR%\frontend\node_modules" (
+    call npm ci --silent
 )
-call npm ci --silent
 if errorlevel 1 (
     echo npm ci failed.
     pause
@@ -52,26 +93,20 @@ echo Frontend build done: %FRONTEND_DIST%
 REM 2. Install backend dependencies.
 echo [2/4] Installing backend dependencies...
 if not exist "%PROJECT_DIR%\venv\Scripts\python.exe" (
-    python -m venv "%PROJECT_DIR%\venv"
+    "%PYTHON_EXE%" -m venv "%PROJECT_DIR%\venv"
     if errorlevel 1 (
         echo Failed to create Python virtual environment.
         pause
         exit /b 1
     )
 )
-call "%PROJECT_DIR%\venv\Scripts\activate.bat"
-if errorlevel 1 (
-    echo Failed to activate Python virtual environment.
-    pause
-    exit /b 1
-)
-python -m pip install -q -r "%BACKEND_DIR%\requirements.txt"
+"%PYTHON_EXE%" -m pip install -q -r "%BACKEND_DIR%\requirements.txt"
 if errorlevel 1 (
     echo Backend dependency installation failed.
     pause
     exit /b 1
 )
-python -m pip install -q pyinstaller
+"%PYTHON_EXE%" -m pip install -q pyinstaller
 if errorlevel 1 (
     echo PyInstaller installation failed.
     pause
@@ -101,7 +136,7 @@ if exist "%DIST_DIR%\Weix" (
     )
 )
 
-python -m PyInstaller ^
+"%PYTHON_EXE%" -m PyInstaller ^
     --name=Weix ^
     --onedir ^
     --noconsole ^
@@ -109,12 +144,13 @@ python -m PyInstaller ^
     --clean ^
     --noconfirm ^
     --paths="%BACKEND_DIR%" ^
-    --add-data "%PROJECT_DIR%\config;config" ^
-    --add-data "%PROJECT_DIR%\data;data" ^
-    --add-data "%PROJECT_DIR%\tools;tools" ^
+    --add-data "%PACKAGE_CONFIG%;config" ^
+    --add-data "%PACKAGE_DATA%;data" ^
     --add-data "%FRONTEND_DIST%;frontend_dist" ^
     --hidden-import=app.core.wechat_paths_windows ^
-    --hidden-import=app.core.windows_dbkey_hook ^
+    --hidden-import=app.core.windows_runtime ^
+    --hidden-import=wechatauto.uia_driver ^
+    --collect-submodules=app ^
     --hidden-import=PyQt6 ^
     --hidden-import=PyQt6.QtWidgets ^
     --hidden-import=PyQt6.QtCore ^
@@ -182,6 +218,13 @@ if errorlevel 1 (
     exit /b 1
 )
 
+copy /y "%PROJECT_DIR%\scripts\start_weix.bat" "%DIST_DIR%\Weix\start_weix.bat" >nul
+if errorlevel 1 (
+    echo Failed to copy the packaged start script.
+    pause
+    exit /b 1
+)
+
 REM 4. Cleanup build files.
 echo [4/4] Cleaning temporary files...
 if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
@@ -191,5 +234,6 @@ echo ==========================================
 echo  Build complete.
 echo  App dir: %DIST_DIR%\Weix
 echo  Run: %DIST_DIR%\Weix\Weix.exe
+echo  Management UI: http://127.0.0.1:8000
 echo ==========================================
 pause

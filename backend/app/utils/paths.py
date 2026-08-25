@@ -83,7 +83,17 @@ def get_data_dir() -> Path:
 
 def get_config_dir() -> Path:
     """获取配置目录"""
-    return _get_writable_dir("config")
+    config_dir = _get_writable_dir("config")
+    config_file = config_dir / "config.yaml"
+    example_file = config_dir / "config.example.yaml"
+    if not config_file.exists() and example_file.exists():
+        try:
+            shutil.copy2(example_file, config_file)
+        except OSError as exc:
+            raise RuntimeError(
+                f"无法创建运行配置文件 {config_file}，请将程序解压到可写目录: {exc}"
+            ) from exc
+    return config_dir
 
 
 def get_frontend_dir() -> Path:

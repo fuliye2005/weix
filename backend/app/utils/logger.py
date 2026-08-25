@@ -15,7 +15,10 @@ def setup_logging(level: int = logging.INFO):
     root = logging.getLogger()
     preserved_handlers = [
         h for h in root.handlers
-        if getattr(h, "_weix_qt_handler", False)
+        if (
+            getattr(h, "_weix_qt_handler", False)
+            or getattr(h, "_weix_preserve", False)
+        )
     ]
     root.setLevel(level)
     root.handlers.clear()
