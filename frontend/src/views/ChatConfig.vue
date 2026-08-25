@@ -54,6 +54,43 @@
             <span v-else>重启后端会重新加载配置、数据库和自动回复流水线。</span>
           </div>
         </el-form-item>
+        <el-divider content-position="left">UIA 发送策略</el-divider>
+        <el-form-item label="发送路径">
+          <el-radio-group v-model="form.windows_sender.send_mode">
+            <el-radio-button label="auto">后台优先</el-radio-button>
+            <el-radio-button label="background_uia">仅后台</el-radio-button>
+            <el-radio-button label="foreground_uia">仅前台</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="后台最大尝试次数">
+          <el-input-number
+            v-model="form.windows_sender.background_attempts"
+            :min="1"
+            :max="10"
+            controls-position="right"
+          />
+          <span class="field-hint">仅在尚未执行发送动作时重试。</span>
+        </el-form-item>
+        <el-form-item label="前台最大尝试次数">
+          <el-input-number
+            v-model="form.windows_sender.foreground_attempts"
+            :min="1"
+            :max="10"
+            controls-position="right"
+          />
+          <span class="field-hint">前台失败后不再自动使用鼠标发送。</span>
+        </el-form-item>
+        <el-form-item label="后台 UIA 发送动作">
+          <el-switch v-model="form.windows_sender.background_post_message" />
+          <span class="field-hint">关闭后仅使用 UIA Pattern；建议保持开启。</span>
+        </el-form-item>
+        <el-form-item label="失败后接管前台">
+          <el-switch
+            v-model="form.windows_sender.allow_foreground_activation"
+            :disabled="form.windows_sender.send_mode !== 'auto'"
+          />
+          <span class="field-hint">仅“后台优先”模式有效。</span>
+        </el-form-item>
         <el-form-item label="群聊权限">
           <el-radio-group v-model="form.group_chat_mode">
             <el-radio label="all">所有人</el-radio>
@@ -210,6 +247,13 @@ const form = reactive<any>({
   private_chat_mode: 'all',
   private_whitelist: [],
   reply_mode: 'all',
+  windows_sender: {
+    send_mode: 'auto',
+    background_post_message: true,
+    allow_foreground_activation: true,
+    background_attempts: 1,
+    foreground_attempts: 1,
+  },
 })
 
 // 全量数据：用于已选标签的名称展示
@@ -234,6 +278,19 @@ const restarting = ref(false)
 const uiaDiagnosing = ref(false)
 const uiaDialogVisible = ref(false)
 const uiaDiagnosis = ref<any>(null)
+
+function ensureWindowsSenderConfig() {
+  if (!form.windows_sender || typeof form.windows_sender !== 'object') {
+    form.windows_sender = {}
+  }
+  Object.assign(form.windows_sender, {
+    send_mode: 'auto',
+    background_post_message: true,
+    allow_foreground_activation: true,
+    background_attempts: 1,
+    foreground_attempts: 1,
+  }, form.windows_sender)
+}
 
 function roomName(id: string) {
   const found = allChatrooms.value.find((r: any) => r.room_id === id)
@@ -443,6 +500,7 @@ onMounted(async () => {
   try {
     const res = await getChatConfig()
     if (res.data) Object.assign(form, res.data)
+    ensureWindowsSenderConfig()
   } catch {
     ElMessage.error('加载配置失败')
   }
@@ -479,6 +537,7 @@ onMounted(async () => {
 async function saveConfig() {
   saving.value = true
   try {
+    ensureWindowsSenderConfig()
     await updateChatConfig(form)
     ElMessage.success('配置已保存')
   } finally {
@@ -502,6 +561,19 @@ async function saveConfig() {
   margin-top: 16px;
 }
 
+.uia-policy-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #606266;
+}
+
+.field-hint {
+  margin-left: 12px;
+  color: #909399;
+  font-size: 12px;
+}
+
 .uia-error {
   color: #f56c6c;
   word-break: break-word;
@@ -511,6 +583,16 @@ async function saveConfig() {
   .restart-row {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .uia-policy-summary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .field-hint {
+    display: block;
+    margin: 6px 0 0;
   }
 }
 </style>

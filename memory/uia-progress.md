@@ -32,7 +32,8 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 - [x] 确认项目当前使用 `uiautomation 2.0.29`。
 - [x] 确认 UIA accessibility gate 可以热激活。
 - [x] 确认当前配置为 `method: uia`。
-- [x] 确认当前默认配置为 `send_mode: auto`，优先后台 UIA，条件不足时按配置切换前台 UIA。
+- [x] 确认当前默认配置为 `send_mode: auto`，优先后台 UIA，条件不足或可重试失败耗尽时按配置切换前台 UIA。
+- [x] 增加后台/前台独立最大尝试次数，并在管理界面暴露；只有尚未执行发送动作的失败才允许重试或切换模式。
 - [x] 确认当前配置为 `allow_mouse_fallback: false`。
 - [x] 确认 UIA 运行时要求 Python 3.12 x64，并拒绝 32 位 Python。
 - [x] 确认 `sender_windows_uia.py` 中已经存在 `_find_send_button()`。
@@ -58,6 +59,7 @@ UIA 的基础可用性已经确认：微信窗口的 UIA accessibility gate 可�
 - [x] 启动脚本改为固定使用 `venv\Scripts\python.exe`，并在启动前检查 UIA 依赖是否来自同一环境。
 - [x] 从外部 Python 3.13 的 `_pth` 中移除 `venv-py313-stale` 路径。
 - [x] `auto` 在后台能力可用时保留前台 UIA 候选，但仅在没有执行发送动作且没有触发输入状态变化时允许切换。
+- [x] `auto` 支持按 `background_attempts` 和 `foreground_attempts` 重试；所有尝试耗尽后保留明确的失败阶段、错误码和尝试历史。
 - [x] 前台 Pattern 假成功时尝试 UIA 发现的按钮 `PostMessage:WM_LBUTTON`，不移动真实鼠标。
 
 ## 尚未完成

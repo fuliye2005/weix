@@ -89,15 +89,17 @@ cp .env.example .env
 
 然后编辑这两个文件，填入你的 API Key 等信息。
 
-Windows UIA 生产环境建议先使用前台 UIA：允许短暂激活微信窗口，但不移动鼠标、不使用坐标点击：
+Windows UIA 生产环境默认使用后台优先策略：后台 UIA 先尝试，只有在尚未执行发送动作且达到后台尝试次数后，才按配置切换前台 UIA：
 
 ```yaml
 windows_sender:
   method: uia
-  send_mode: foreground_uia
+  send_mode: auto
   background_mode: false
   allow_foreground_activation: true
-  background_post_message: false
+  background_post_message: true
+  background_attempts: 1
+  foreground_attempts: 1
   ensure_full_layout: true
   allow_mouse_fallback: false
   send_key_fallback: none
@@ -109,8 +111,9 @@ windows_sender:
   park_after_send: false
 ```
 
-`foreground_uia` 只通过 UIA 控件树定位会话、写入输入框，并调用发送按钮的 `InvokePattern`、`LegacyIAccessible.DoDefaultAction` 或明确配置的按钮键盘兜底；
-不自动回退鼠标或坐标点击。`send_button_key_fallback` 是对已找到的真实发送按钮执行默认动作，不是向聊天输入框盲发 Enter；`background_uia` 永不使用此键盘兜底，必须先通过后台 Pattern 能力检测，并且不能改变前台窗口、键盘焦点或鼠标位置。
+`auto` 默认先走 `background_uia`，后台失败次数由 `background_attempts` 控制；后台能力不足或次数耗尽后，只有 `allow_foreground_activation: true` 才会走 `foreground_uia`，前台次数由 `foreground_attempts` 控制。
+每次重试都必须先证明上一轮没有执行发送动作；只要已经调用发送按钮、输入框已清空、消息状态不明确或后台改变了全局输入状态，就会立即停止，禁止换路径重复发送。系统永不回退鼠标物理点击。
+`send_button_key_fallback` 是前台 UIA 对已找到的真实发送按钮执行默认动作，不是向聊天输入框盲发 Enter；`background_uia` 永不使用键盘兜底。
 两条 UIA 路径都必须先通过所选账号的 PID 绑定校验。
 当前微信版本的 `InvokePattern` 可能返回调用成功而不真正发送，因此不能单独作为成功依据。
 
@@ -121,7 +124,7 @@ windows_sender:
 3. `db_verify`：目标会话的本地消息数据库发现同一正文。若微信落盘较慢，状态暂时为 `pending_verify`，
    后台只查库重试，不会重复调用 UIA 发送动作。
 
-管理后台“聊天配置 → UIA 检测”可以查看 `binding_status`、选中账号、绑定账号、绑定 PID、驱动 PID、窗口 PID、
+管理后台“聊天配置 → UIA 发送策略”可以配置后台/前台最大尝试次数、后台优先模式和失败后是否允许前台接管；“UIA 检测”可以查看 `binding_status`、选中账号、绑定账号、绑定 PID、驱动 PID、窗口 PID、
 输入框、发送按钮和 `error_code`。常见绑定错误码包括 `ambiguous_process`、`account_binding_mismatch`、
 `account_binding_unverified`、`window_pid_mismatch`；常见投递错误码包括 `target_id_required`、
 `db_not_confirmed`、`uia_exception`。

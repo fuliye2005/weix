@@ -95,6 +95,65 @@ class RawConfigUpdateRequest(BaseModel):
     content: str = Field(min_length=1)
 
 
+_UIA_POLICY_DEFAULTS = {
+    "send_mode": "auto",
+    "background_post_message": True,
+    "allow_foreground_activation": True,
+    "background_attempts": 1,
+    "foreground_attempts": 1,
+}
+
+
+def _normalize_uia_policy(data: dict | None) -> dict:
+    """Validate the small sender policy surface exposed in ChatConfig."""
+    source = data if isinstance(data, dict) else {}
+    mode = str(source.get("send_mode", _UIA_POLICY_DEFAULTS["send_mode"]) or "").strip().lower()
+    if mode not in {"auto", "background_uia", "foreground_uia"}:
+        mode = _UIA_POLICY_DEFAULTS["send_mode"]
+
+    def attempts(key: str) -> int:
+        try:
+            return max(1, min(10, int(source.get(key, _UIA_POLICY_DEFAULTS[key]))))
+        except (TypeError, ValueError):
+            return int(_UIA_POLICY_DEFAULTS[key])
+
+    return {
+        "send_mode": mode,
+        "background_post_message": bool(
+            source.get("background_post_message", _UIA_POLICY_DEFAULTS["background_post_message"])
+        ),
+        "allow_foreground_activation": bool(
+            source.get(
+                "allow_foreground_activation",
+                _UIA_POLICY_DEFAULTS["allow_foreground_activation"],
+            )
+        ),
+        "background_attempts": attempts("background_attempts"),
+        "foreground_attempts": attempts("foreground_attempts"),
+    }
+
+
+def _get_uia_policy() -> dict:
+    cfg = get_config()
+    return _normalize_uia_policy(cfg.windows_sender)
+
+
+def _refresh_runtime_uia_policy() -> None:
+    """Apply saved policy to an already-created sender without restarting."""
+    try:
+        from app.core.platform import Platform
+
+        platform = Platform.get()
+        sender = getattr(platform, "_sender", None)
+        uia_sender = getattr(sender, "_uia_sender", None)
+        refresh = getattr(uia_sender, "refresh_send_policy", None)
+        if callable(refresh):
+            refresh()
+    except Exception:
+        # A later sender construction will read the saved config normally.
+        pass
+
+
 def _mask_api_key(value: object) -> str:
     secret = str(value or "")
     if not secret:
@@ -226,25 +285,37 @@ async def validate_raw_config(payload: RawConfigUpdateRequest):
 # --- Chat Config ---
 @router.get("/config/chat")
 async def get_chat_config():
-    return get_config().auto_reply
+    payload = dict(get_config().auto_reply)
+    payload["windows_sender"] = _get_uia_policy()
+    return payload
 
 
 @router.put("/config/chat")
 async def update_chat_config(data: dict):
     cfg = get_config()
+    data = dict(data or {})
+    sender_data = data.pop("windows_sender", None)
     cfg.auto_reply.update(data)
+    sender_policy = _normalize_uia_policy(sender_data) if sender_data is not None else None
+    if sender_policy is not None:
+        cfg.windows_sender.update(sender_policy)
 
     config_path = _get_config_path()
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             raw = yaml.safe_load(f)
         raw["auto_reply"].update(data)
+        if sender_policy is not None:
+            raw.setdefault("windows_sender", {}).update(sender_policy)
         with open(config_path, "w", encoding="utf-8") as f:
             yaml.safe_dump(raw, f, allow_unicode=True, default_flow_style=False)
     except Exception as e:
         raise HTTPException(500, f"配置保存失败: {e}")
 
-    return {"success": True}
+    if sender_policy is not None:
+        _refresh_runtime_uia_policy()
+
+    return {"success": True, "windows_sender": _get_uia_policy()}
 
 
 # --- AI Config ---

@@ -59,4 +59,5 @@ config/config.yaml
 .env.local
 .env.*.local
 *.log
+logs/*.json
 @AutomationLog.txt

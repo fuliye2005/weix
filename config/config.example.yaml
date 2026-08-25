@@ -63,8 +63,8 @@ macos_sender:
 
 windows_sender:
   method: uia
-  # 生产默认走前台 UIA：允许短暂激活窗口，但不移动鼠标、不使用坐标点击
-  send_mode: foreground_uia
+  # 生产默认后台 UIA 优先；后台失败且未执行发送动作时才切换前台 UIA
+  send_mode: auto
   background_mode: false
   allow_foreground_activation: true
   # 窄窗口时通过 Win32 ShowWindow 恢复完整导航布局，不执行鼠标或坐标点击
@@ -75,8 +75,11 @@ windows_sender:
   # 微信 4.x 的按钮 Pattern 可能返回成功但不执行；显式聚焦按钮后触发其默认动作
   # 这是前台 UIA 兜底，不移动鼠标、不使用坐标；后台 UIA 永不使用此选项
   send_button_key_fallback: enter
-  # 禁止使用基于按钮坐标的窗口消息兜底；只接受真实 UIA Pattern 调用
-  background_post_message: false
+  # 使用 UIA 找到的真实发送按钮投递窗口消息；不移动真实鼠标、不注入键盘
+  background_post_message: true
+  # 每种模式的总尝试次数；只有尚未执行发送动作时才会重试
+  background_attempts: 1
+  foreground_attempts: 1
   require_ui_verify: true
   input_verify_timeout: 3.0
   ui_verify_timeout: 4.0
@@ -130,7 +133,7 @@ wechat:
     version: 4.x
   windows:
     data_dir: auto
-    version: 3.9.12.51
+    version: 4.1.12.26
 
 workflow_engine: legacy
 workflows: []

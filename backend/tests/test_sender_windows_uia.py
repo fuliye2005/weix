@@ -678,6 +678,82 @@ def test_auto_does_not_fallback_after_background_input_state_changed(monkeypatch
     assert calls == [True]
 
 
+def test_background_retries_then_switches_to_foreground(monkeypatch):
+    sender = WindowsUIASender()
+    sender._send_mode = "auto"
+    sender._background_attempts = 2
+    sender._foreground_attempts = 1
+    calls = []
+
+    def send_once(_msg, _receiver, _is_group, _target_id, method, _attempt_id=""):
+        calls.append(method)
+        result = SendResult.for_message("你好", "wxid_target", method)
+        if method == "background_uia":
+            return result.fail("search", "background_transient", "后台暂时找不到会话")
+        return result.sent("ui_verify", action_performed=True, ui_verified=True)
+
+    monkeypatch.setattr(
+        sender,
+        "_candidate_methods",
+        lambda: ["background_uia", "foreground_uia"],
+    )
+    monkeypatch.setattr(sender, "_send_text_once", send_once)
+
+    result = sender._send_text_sync_result("你好", "目标", False, "wxid_target")
+
+    assert result.success is True
+    assert calls == ["background_uia", "background_uia", "foreground_uia"]
+    assert [item["method"] for item in result.details["delivery_attempts"]] == calls
+    assert result.details["delivery_policy"]["background_attempts"] == 2
+
+
+def test_foreground_retries_until_configured_limit(monkeypatch):
+    sender = WindowsUIASender()
+    sender._send_mode = "foreground_uia"
+    sender._foreground_attempts = 2
+    calls = []
+
+    def send_once(*_args):
+        calls.append(True)
+        result = SendResult.for_message("你好", "wxid_target", "foreground_uia")
+        if len(calls) == 1:
+            return result.fail("draft", "draft_transient", "正文暂时写入失败")
+        return result.sent("ui_verify", action_performed=True, ui_verified=True)
+
+    monkeypatch.setattr(sender, "_candidate_methods", lambda: ["foreground_uia"])
+    monkeypatch.setattr(sender, "_send_text_once", send_once)
+
+    result = sender._send_text_sync_result("你好", "目标", False, "wxid_target")
+
+    assert result.success is True
+    assert len(calls) == 2
+    assert result.details["delivery_attempts"][0]["error_code"] == "draft_transient"
+
+
+def test_attempt_limit_exhaustion_returns_explicit_failure(monkeypatch):
+    sender = WindowsUIASender()
+    sender._send_mode = "background_uia"
+    sender._background_attempts = 2
+    calls = []
+
+    def send_once(*_args):
+        calls.append(True)
+        return SendResult.for_message("你好", "wxid_target", "background_uia").fail(
+            "window", "background_unavailable", "后台窗口暂不可用"
+        )
+
+    monkeypatch.setattr(sender, "_candidate_methods", lambda: ["background_uia"])
+    monkeypatch.setattr(sender, "_send_text_once", send_once)
+
+    result = sender._send_text_sync_result("你好", "目标", False, "wxid_target")
+
+    assert result.success is False
+    assert result.status == "failed"
+    assert result.details["attempts_exhausted"] is True
+    assert len(result.details["delivery_attempts"]) == 2
+    assert len(calls) == 2
+
+
 def test_uia_retries_text_after_readback_mismatch(monkeypatch):
     sender = WindowsUIASender()
     sender._send_mode = "foreground_uia"

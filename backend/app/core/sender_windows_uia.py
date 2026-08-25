@@ -180,6 +180,56 @@ class WindowsUIASender:
         self._last_binding_error: dict[str, Any] | None = None
         self._last_navigation_error: dict[str, Any] | None = None
         self._last_background_capability: dict[str, Any] = {}
+        self._background_attempts = 1
+        self._foreground_attempts = 1
+        self._refresh_send_policy()
+
+    @staticmethod
+    def _attempt_limit(value: Any, default: int = 1) -> int:
+        """Keep retry counts bounded so a bad config cannot loop indefinitely."""
+        try:
+            return max(1, min(10, int(value)))
+        except (TypeError, ValueError):
+            return default
+
+    def _refresh_send_policy(self) -> None:
+        """Reload the live send policy without rebuilding the UIA driver."""
+        win_cfg = get_config().windows_sender if hasattr(get_config(), "windows_sender") else {}
+        configured_mode = str(win_cfg.get("send_mode", "") or "").strip().lower()
+        if configured_mode not in {"foreground_uia", "background_uia", "auto"}:
+            configured_mode = (
+                "background_uia"
+                if bool(win_cfg.get("background_mode", False))
+                else "foreground_uia"
+            )
+        self._send_mode = configured_mode
+        self._background_mode = configured_mode == "background_uia"
+        self._allow_foreground_activation = bool(
+            win_cfg.get("allow_foreground_activation", False)
+        )
+        self._background_post_message = bool(
+            win_cfg.get("background_post_message", False)
+        )
+        self._send_key_fallback = str(
+            win_cfg.get("send_key_fallback", "none") or "none"
+        ).strip().lower()
+        if self._send_key_fallback not in {"none", "enter", "ctrl_enter"}:
+            self._send_key_fallback = "none"
+        self._send_button_key_fallback = str(
+            win_cfg.get("send_button_key_fallback", "none") or "none"
+        ).strip().lower()
+        if self._send_button_key_fallback not in {"none", "enter", "ctrl_enter"}:
+            self._send_button_key_fallback = "none"
+        self._background_attempts = self._attempt_limit(
+            win_cfg.get("background_attempts", 1)
+        )
+        self._foreground_attempts = self._attempt_limit(
+            win_cfg.get("foreground_attempts", 1)
+        )
+
+    def refresh_send_policy(self) -> None:
+        """Public hook used by the management API after saving sender settings."""
+        self._refresh_send_policy()
 
     async def send_text(
         self,
@@ -1319,6 +1369,25 @@ class WindowsUIASender:
             return []
         return [self._send_mode]
 
+    def _attempt_limit_for_method(self, method: str) -> int:
+        if method == "background_uia":
+            return self._background_attempts
+        return self._foreground_attempts
+
+    @staticmethod
+    def _can_retry_result(result: SendResult) -> bool:
+        """Retry only failures proven to have happened before delivery."""
+        if result.status == "pending_verify":
+            return False
+        if result.action_performed or result.draft_cleared:
+            return False
+        if result.ui_verified or result.db_verified:
+            return False
+        # A global input-state change is a hard safety stop, never a fallback.
+        if result.error_code == "background_input_state_changed":
+            return False
+        return True
+
     @staticmethod
     def _foreground_input_state() -> dict[str, int]:
         """Read foreground/focus/cursor state without changing Windows input state."""
@@ -1869,44 +1938,90 @@ class WindowsUIASender:
     ) -> SendResult:
         """Run the configured UIA mode(s) serially inside the UIA executor."""
         last_result: SendResult | None = None
-        for method in self._candidate_methods():
-            result = self._send_text_once(
-                msg,
-                receiver,
-                is_group,
-                target_id,
-                method,
-                attempt_id,
-            )
-            if result.success:
-                return result
-            last_result = result
-            if self._send_mode != "auto":
-                break
-            if result.error_code == "background_input_state_changed":
-                logger.error(
-                    "后台 UIA 已改变全局输入状态，禁止切换模式继续发送 | stage=%s",
-                    result.stage,
-                )
-                break
-            if result.action_performed or result.draft_cleared:
-                logger.error(
-                    "UIA 已经执行过发送动作，禁止切换模式重复发送 | method=%s | stage=%s | code=%s",
+        attempt_history: list[dict[str, Any]] = []
+        methods = self._candidate_methods()
+        policy = {
+            "send_mode": self._send_mode,
+            "background_attempts": self._background_attempts,
+            "foreground_attempts": self._foreground_attempts,
+            "allow_foreground_activation": self._allow_foreground_activation,
+        }
+
+        for method in methods:
+            max_attempts = self._attempt_limit_for_method(method)
+            for attempt_number in range(1, max_attempts + 1):
+                result = self._send_text_once(
+                    msg,
+                    receiver,
+                    is_group,
+                    target_id,
                     method,
-                    result.stage,
-                    result.error_code,
+                    attempt_id,
                 )
-                break
+                attempt_history.append(
+                    {
+                        "method": method,
+                        "attempt": attempt_number,
+                        "max_attempts": max_attempts,
+                        "status": result.status,
+                        "stage": result.stage,
+                        "error_code": result.error_code,
+                        "action_performed": result.action_performed,
+                        "draft_cleared": result.draft_cleared,
+                    }
+                )
+                result.details["delivery_attempts"] = list(attempt_history)
+                result.details["delivery_policy"] = dict(policy)
+                last_result = result
+
+                if result.success:
+                    return result
+                if not self._can_retry_result(result):
+                    if result.action_performed or result.draft_cleared:
+                        logger.error(
+                            "UIA 已经执行过发送动作，禁止重试或切换模式 | method=%s | stage=%s | code=%s",
+                            method,
+                            result.stage,
+                            result.error_code,
+                        )
+                    elif result.error_code == "background_input_state_changed":
+                        logger.error(
+                            "后台 UIA 已改变全局输入状态，禁止重试或切换模式 | stage=%s",
+                            result.stage,
+                        )
+                    return result
+                if attempt_number < max_attempts:
+                    logger.warning(
+                        "UIA 发送失败，按配置重试当前模式 (%s/%s) | method=%s | stage=%s | code=%s",
+                        attempt_number,
+                        max_attempts,
+                        method,
+                        result.stage,
+                        result.error_code,
+                    )
+                    continue
+
             logger.warning(
-                "UIA 模式发送失败，尝试下一模式 | method=%s | stage=%s | code=%s",
+                "UIA 模式已耗尽配置次数，准备切换下一模式 | method=%s | attempts=%s",
                 method,
-                result.stage,
-                result.error_code,
+                max_attempts,
             )
 
-        return last_result or SendResult.for_message(
+        if last_result is not None:
+            last_result.details["attempts_exhausted"] = True
+            last_result.details["delivery_attempts"] = list(attempt_history)
+            last_result.details["delivery_policy"] = dict(policy)
+            return last_result
+        return SendResult.for_message(
             msg,
             target_id or receiver,
             self._send_mode,
             attempt_id,
-        ).fail("window", "uia_not_attempted", "没有可用的 UIA 发送模式")
+        ).fail(
+            "window",
+            "uia_not_attempted",
+            "没有可用的 UIA 发送模式",
+            attempts_exhausted=True,
+            delivery_policy=policy,
+            delivery_attempts=attempt_history,
+        )
