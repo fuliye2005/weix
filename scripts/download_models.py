@@ -8,13 +8,37 @@
 import logging
 import os
 import sys
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
 
+def configured_embedding_provider() -> str:
+    """读取配置，云端 Embedding 模式不再下载无用的本地模型。"""
+    try:
+        import yaml
+
+        for filename in ("config/config.yaml", "config/config.example.yaml"):
+            path = Path(filename)
+            if not path.exists():
+                continue
+            raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            embedding = (raw.get("ai") or {}).get("embedding") or {}
+            provider = str(embedding.get("provider") or "local").strip().lower()
+            return provider or "local"
+    except Exception as exc:
+        logger.debug("读取 Embedding 预下载配置失败，按本地模式处理: %s", exc)
+    return "local"
+
+
 def download_embedding_model():
     """下载 sentence-transformers embedding 模型 (~1.3GB)。"""
+    provider = configured_embedding_provider()
+    if provider != "local":
+        logger.info("当前 Embedding provider=%s，跳过本地模型下载。", provider)
+        return True
+
     model_name = "paraphrase-multilingual-MiniLM-L12-v2"
 
     # 国内优先使用镜像
@@ -73,6 +97,10 @@ def download_tiktoken():
 
 def download_chromadb_embedding():
     """预热 chromadb embedding 模型 (~90MB)。"""
+    if configured_embedding_provider() != "local":
+        logger.info("当前使用云端 Embedding，跳过 Chroma 默认本地模型预热。")
+        return True
+
     logger.info("-" * 50)
     logger.info("预热 chromadb embedding 模型...")
 
@@ -91,9 +119,13 @@ def download_chromadb_embedding():
 
 
 def main():
+    provider = configured_embedding_provider()
     logger.info("Weix AI 模型预下载")
     logger.info("")
-    logger.info("预计下载总量: ~1.4GB")
+    if provider == "local":
+        logger.info("预计下载总量: ~1.4GB")
+    else:
+        logger.info("当前 Embedding provider=%s，无需下载本地 Embedding 模型。", provider)
     logger.info("")
 
     results = {

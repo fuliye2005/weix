@@ -107,6 +107,41 @@
               </div>
             </div>
 
+            <el-divider content-position="left">语义检索模型</el-divider>
+            <div class="embedding-settings">
+              <div class="form-grid two-columns">
+                <el-form-item label="Embedding Provider">
+                  <el-select v-model="form.embedding.provider" class="full-width" @change="handleEmbeddingProviderChange">
+                    <el-option v-for="item in embeddingProviders" :key="item.value" :label="item.label" :value="item.value" />
+                  </el-select>
+                  <div class="field-help">只影响历史话术、知识库和长期记忆的语义检索，不负责生成回复。</div>
+                </el-form-item>
+                <el-form-item label="Embedding Model">
+                  <el-input v-model="form.embedding.model" placeholder="text-embedding-v3" @input="syncJsonFromForm" />
+                </el-form-item>
+              </div>
+              <div class="form-grid two-columns">
+                <el-form-item label="Embedding Base URL">
+                  <el-input v-model="form.embedding.base_url" placeholder="云端模型接口地址；本地模型留空" clearable @input="syncJsonFromForm" />
+                </el-form-item>
+                <el-form-item label="Embedding API Key">
+                  <el-input
+                    v-model="embeddingKeyInput"
+                    type="password"
+                    show-password
+                    clearable
+                    autocomplete="new-password"
+                    :placeholder="embeddingKeyConfigured ? embeddingApiKeyPreview : '云端模型填写对应 API Key，本地模型留空'"
+                    @input="syncJsonFromForm"
+                  >
+                    <template #prefix><el-icon><Key /></el-icon></template>
+                  </el-input>
+                  <div class="field-help">云端模型填写对应供应商的 Key；已保存的 Key 不会完整回显。</div>
+                </el-form-item>
+              </div>
+              <div class="embedding-note"><el-icon><InfoFilled /></el-icon>切换 Embedding 模型后会使用独立向量库，旧模型数据不会混用。</div>
+            </div>
+
             <el-collapse v-model="expandedSections" class="advanced-collapse">
               <el-collapse-item name="persona">
                 <template #title><div class="collapse-title"><el-icon><User /></el-icon><span>Persona 参数</span><small>聊天风格分析使用</small></div></template>
@@ -205,6 +240,10 @@ const testing = ref(false)
 const keyConfigured = ref(false)
 const apiKeyPreview = ref('')
 const keyInput = ref('')
+const embeddingKeyConfigured = ref(false)
+const embeddingApiKeyPreview = ref('')
+const embeddingKeyInput = ref('')
+const embeddingProviderBeforeChange = ref('local')
 const jsonText = ref('')
 const savedJson = ref('')
 const jsonError = ref('')
@@ -228,7 +267,20 @@ const form = reactive<AnyRecord>({
   system_prompt: '',
   allow_network_search: true,
   search_unknown_terms: true,
+  embedding: {
+    provider: 'local',
+    model: 'paraphrase-multilingual-MiniLM-L12-v2',
+    base_url: '',
+    api_key: '',
+  },
 })
+
+const embeddingProviders = [
+  { value: 'local', label: '本地模型（离线）', model: 'paraphrase-multilingual-MiniLM-L12-v2', base_url: '' },
+  { value: 'dashscope', label: 'DashScope · text-embedding-v3', model: 'text-embedding-v3', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
+  { value: 'siliconflow', label: 'SiliconFlow · BAAI/bge-large-zh-v1.5', model: 'BAAI/bge-large-zh-v1.5', base_url: 'https://api.siliconflow.cn/v1' },
+  { value: 'openai', label: 'OpenAI · text-embedding-3-small', model: 'text-embedding-3-small', base_url: 'https://api.openai.com/v1' },
+]
 
 const jsonValid = computed(() => {
   if (!jsonText.value.trim()) return false
@@ -266,7 +318,29 @@ function formFields() {
     system_prompt: form.system_prompt,
     allow_network_search: Boolean(form.allow_network_search),
     search_unknown_terms: Boolean(form.search_unknown_terms),
+    embedding: {
+      provider: form.embedding?.provider || 'local',
+      model: form.embedding?.model || '',
+      base_url: form.embedding?.base_url || '',
+      api_key: embeddingKeyInput.value.trim() || form.embedding?.api_key || '',
+    },
   }
+}
+
+function handleEmbeddingProviderChange(provider: string) {
+  const providerChanged = embeddingProviderBeforeChange.value !== provider
+  const preset = embeddingProviders.find((item) => item.value === provider)
+  if (preset) {
+    form.embedding.model = preset.model
+    form.embedding.base_url = preset.base_url
+  }
+  if (providerChanged) {
+    // 不把上一个供应商的隐藏 Key 带到新供应商。
+    embeddingKeyInput.value = ''
+    form.embedding.api_key = ''
+  }
+  embeddingProviderBeforeChange.value = provider
+  syncJsonFromForm()
 }
 
 function syncJsonFromForm() {
@@ -305,6 +379,18 @@ function applyJsonToForm(showMessage = true) {
     keyInput.value = ''
     form.api_key = incomingKey
   }
+  const incomingEmbedding = data.embedding
+  if (incomingEmbedding && typeof incomingEmbedding === 'object' && !Array.isArray(incomingEmbedding)) {
+    form.embedding = { ...form.embedding, ...incomingEmbedding }
+    const incomingEmbeddingKey = String(incomingEmbedding.api_key ?? '')
+    if (incomingEmbeddingKey && !incomingEmbeddingKey.startsWith('***')) {
+      embeddingKeyInput.value = incomingEmbeddingKey
+      form.embedding.api_key = incomingEmbeddingKey
+    } else {
+      embeddingKeyInput.value = ''
+      form.embedding.api_key = incomingEmbeddingKey
+    }
+  }
   if (showMessage) ElMessage.success('JSON 已应用到表单')
   return true
 }
@@ -341,10 +427,29 @@ async function loadConfig() {
   const response = await getAIConfig()
   const data = response.data || {}
   keyConfigured.value = Boolean(data.api_key_configured)
+  embeddingKeyConfigured.value = Boolean(data.embedding_api_key_configured)
   const maskedKey = maskApiKey(data.api_key, data.api_key_preview, keyConfigured.value)
   apiKeyPreview.value = maskedKey
   keyInput.value = ''
-  const { api_key_configured: _configured, api_key_preview: _preview, models: _models, ...initialData } = data
+  const embeddingMaskedKey = maskApiKey(data.embedding?.api_key, data.embedding_api_key_preview, embeddingKeyConfigured.value)
+  embeddingApiKeyPreview.value = embeddingMaskedKey
+  embeddingKeyInput.value = ''
+  const {
+    api_key_configured: _configured,
+    api_key_preview: _preview,
+    embedding_api_key_configured: _embeddingConfigured,
+    embedding_api_key_preview: _embeddingPreview,
+    models: _models,
+    ...initialData
+  } = data
+  initialData.embedding = {
+    provider: 'local',
+    model: 'paraphrase-multilingual-MiniLM-L12-v2',
+    base_url: '',
+    ...(initialData.embedding || {}),
+    api_key: embeddingMaskedKey,
+  }
+  embeddingProviderBeforeChange.value = initialData.embedding.provider
   const initial = { ...initialData, api_key: maskedKey }
   Object.assign(form, initial)
   form.api_key = maskedKey
@@ -412,7 +517,7 @@ onMounted(async () => {
 <style scoped>
 .ai-config-page { max-width: 1480px; margin: 0 auto; color: #182230; }
 .page-hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 22px; }.eyebrow { display: flex; align-items: center; gap: 7px; color: #667085; font-size: 12px; font-weight: 700; letter-spacing: .12em; }h1 { margin: 8px 0 6px; color: #101828; font-size: 28px; letter-spacing: -.02em; }.page-hero p { margin: 0; color: #667085; font-size: 13px; }.hero-actions, .bottom-bar, .json-toolbar, .json-footer, .side-title { display: flex; align-items: center; gap: 10px; }.security-alert { margin-bottom: 18px; }
-.config-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(390px, .78fr); gap: 18px; align-items: start; }.form-column, .json-column { display: flex; flex-direction: column; gap: 18px; min-width: 0; }.panel, .json-card, .summary-card, .result-card { border: 1px solid #e4e7ec; border-radius: 12px; }.panel :deep(.el-card__body), .summary-card :deep(.el-card__body), .result-card :deep(.el-card__body) { padding: 22px; }.json-card :deep(.el-card__body) { padding: 20px; }.panel-heading, .json-heading { display: flex; justify-content: space-between; gap: 18px; margin-bottom: 20px; }.panel-title { color: #101828; font-size: 17px; font-weight: 700; }.panel-description { margin-top: 5px; color: #667085; font-size: 13px; line-height: 1.5; }.config-form :deep(.el-form-item) { margin-bottom: 18px; }.config-form :deep(.el-form-item__label) { padding-bottom: 7px; color: #344054; font-size: 13px; font-weight: 600; }.form-grid { display: grid; gap: 16px; }.two-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }.three-columns { grid-template-columns: repeat(3, minmax(0, 1fr)); }.field-help { margin-top: 6px; color: #667085; font-size: 12px; line-height: 1.45; }.search-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: -2px 0 18px; }.search-setting { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 64px; padding: 13px 15px; border: 1px solid #e4e7ec; border-radius: 8px; background: #fcfcfd; }.search-setting-title { color: #344054; font-size: 13px; font-weight: 600; }.json-status { display: flex; align-items: center; justify-content: center; gap: 7px; height: 32px; border-radius: 6px; font-size: 13px; }.json-status.valid { background: #ecfdf3; color: #067647; }.json-status.invalid { background: #fef3f2; color: #b42318; }.advanced-collapse { border: 1px solid #e4e7ec; border-radius: 9px; overflow: hidden; }.advanced-collapse :deep(.el-collapse-item__header) { height: 52px; padding: 0 14px; }.collapse-title { display: flex; align-items: center; gap: 8px; font-weight: 700; }.collapse-title small { margin-left: 4px; color: #98a2b3; font-size: 12px; font-weight: 400; }.advanced-grid { padding: 18px 14px 0; }.advanced-grid :deep(.el-form-item) { margin-bottom: 18px; }
+.config-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(390px, .78fr); gap: 18px; align-items: start; }.form-column, .json-column { display: flex; flex-direction: column; gap: 18px; min-width: 0; }.panel, .json-card, .summary-card, .result-card { border: 1px solid #e4e7ec; border-radius: 12px; }.panel :deep(.el-card__body), .summary-card :deep(.el-card__body), .result-card :deep(.el-card__body) { padding: 22px; }.json-card :deep(.el-card__body) { padding: 20px; }.panel-heading, .json-heading { display: flex; justify-content: space-between; gap: 18px; margin-bottom: 20px; }.panel-title { color: #101828; font-size: 17px; font-weight: 700; }.panel-description { margin-top: 5px; color: #667085; font-size: 13px; line-height: 1.5; }.config-form :deep(.el-form-item) { margin-bottom: 18px; }.config-form :deep(.el-form-item__label) { padding-bottom: 7px; color: #344054; font-size: 13px; font-weight: 600; }.form-grid { display: grid; gap: 16px; }.two-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }.three-columns { grid-template-columns: repeat(3, minmax(0, 1fr)); }.field-help { margin-top: 6px; color: #667085; font-size: 12px; line-height: 1.45; }.search-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: -2px 0 18px; }.search-setting { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 64px; padding: 13px 15px; border: 1px solid #e4e7ec; border-radius: 8px; background: #fcfcfd; }.search-setting-title { color: #344054; font-size: 13px; font-weight: 600; }.embedding-settings { margin: -2px 0 4px; }.embedding-note { display: flex; align-items: center; gap: 6px; margin: -2px 0 18px; color: #667085; font-size: 12px; }.full-width { width: 100%; }.json-status { display: flex; align-items: center; justify-content: center; gap: 7px; height: 32px; border-radius: 6px; font-size: 13px; }.json-status.valid { background: #ecfdf3; color: #067647; }.json-status.invalid { background: #fef3f2; color: #b42318; }.advanced-collapse { border: 1px solid #e4e7ec; border-radius: 9px; overflow: hidden; }.advanced-collapse :deep(.el-collapse-item__header) { height: 52px; padding: 0 14px; }.collapse-title { display: flex; align-items: center; gap: 8px; font-weight: 700; }.collapse-title small { margin-left: 4px; color: #98a2b3; font-size: 12px; font-weight: 400; }.advanced-grid { padding: 18px 14px 0; }.advanced-grid :deep(.el-form-item) { margin-bottom: 18px; }
 .json-toolbar { justify-content: flex-end; margin: -6px 0 12px; }.json-editor :deep(.el-textarea__inner) { min-height: 650px !important; padding: 17px 18px; border: 1px solid #1d2939; border-radius: 9px; background: #101828; box-shadow: none; color: #d1e9ff; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; line-height: 1.7; resize: none; tab-size: 2; }.json-editor :deep(.el-textarea__inner::placeholder) { color: #667085; }.json-error { display: flex; align-items: flex-start; gap: 6px; margin-top: 9px; color: #b42318; font-size: 12px; line-height: 1.45; }.json-footer { justify-content: space-between; margin-top: 10px; color: #98a2b3; font-size: 11px; }.json-footer span { display: flex; align-items: center; gap: 5px; }
 .side-title { justify-content: space-between; color: #344054; font-size: 14px; font-weight: 700; }.summary-grid { display: flex; flex-direction: column; gap: 13px; margin-top: 20px; }.summary-grid div { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; }.summary-grid span { color: #667085; }.summary-grid strong { max-width: 230px; overflow: hidden; color: #344054; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }.summary-grid strong.ok { color: #067647; }.summary-grid strong.warn { color: #b54708; }.full-button { width: 100%; margin-top: 20px; }.test-hint { margin-top: 8px; color: #98a2b3; font-size: 11px; text-align: center; }.result-card.success { border-color: #abefc6; background: #f6fef9; }.result-card.error { border-color: #fecdca; background: #fff8f7; }.result-title { display: flex; align-items: center; gap: 7px; font-size: 14px; font-weight: 700; }.result-card.success .result-title { color: #067647; }.result-card.error .result-title { color: #b42318; }.result-text { margin-top: 8px; color: #667085; font-size: 12px; line-height: 1.5; word-break: break-word; }.bottom-bar { justify-content: space-between; margin-top: 18px; padding: 14px 2px 2px; color: #667085; font-size: 12px; }.bottom-bar > span { display: flex; align-items: center; gap: 6px; }
 @media (max-width: 1120px) { .config-layout { grid-template-columns: 1fr; }.json-column { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, .7fr); }.json-card { grid-row: span 2; } }

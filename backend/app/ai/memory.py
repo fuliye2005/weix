@@ -122,7 +122,7 @@ class ConversationMemory:
                 if self._vector_store:
                     try:
                         from app.ai.embeddings import get_embedding_manager
-                        em = get_embedding_manager(provider="local")
+                        em = get_embedding_manager()
                         embedding = await em.embed_query_async(summary)
                         self._vector_store.add_conversation_summary(
                             session_id, summary, embedding

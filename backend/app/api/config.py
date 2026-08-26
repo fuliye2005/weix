@@ -163,6 +163,64 @@ def _mask_api_key(value: object) -> str:
     return f"{secret[:3]}{'*' * max(8, len(secret) - 7)}{secret[-4:]}"
 
 
+def _mask_sensitive_config(value):
+    """递归隐藏配置中的 API Key，避免嵌套 provider 泄露密钥。"""
+    if isinstance(value, dict):
+        masked = {}
+        for key, item in value.items():
+            if "api_key" in str(key).lower() and isinstance(item, str):
+                masked[key] = _mask_api_key(item)
+            else:
+                masked[key] = _mask_sensitive_config(item)
+        return masked
+    if isinstance(value, list):
+        return [_mask_sensitive_config(item) for item in value]
+    return value
+
+
+def _merge_config_values(existing, incoming):
+    """递归合并配置，并保留前端传回的掩码密钥。"""
+    if not isinstance(existing, dict) or not isinstance(incoming, dict):
+        return incoming
+
+    merged = dict(existing)
+    for key, value in incoming.items():
+        if (
+            "api_key" in str(key).lower()
+            and isinstance(value, str)
+            and value.startswith("***")
+        ):
+            continue
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_config_values(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _refresh_embedding_runtime() -> None:
+    """让新 Embedding 配置在保存后不再复用旧单例。"""
+    try:
+        from app.ai.embeddings import reset_embedding_managers
+        from app.ai.vector_store import reset_vector_store
+
+        reset_embedding_managers()
+        reset_vector_store()
+    except Exception:
+        # 后续首次请求会重新初始化；刷新失败不应阻止保存配置。
+        pass
+
+    try:
+        import app.main as main_module
+
+        pipeline = getattr(main_module, "_pipeline", None)
+        if pipeline is not None:
+            # Agent 内部持有旧 RAG/Embedding 引用，下一条消息时重新创建。
+            pipeline._ai_agent = None
+    except Exception:
+        pass
+
+
 def _provider_catalog_item(provider_id: str) -> dict:
     return next(
         (item for item in AI_PROVIDER_CATALOG if item["id"] == provider_id),
@@ -353,14 +411,51 @@ async def update_business_config(data: dict):
 @router.get("/config/ai")
 async def get_ai_config():
     cfg = get_config().ai
-    masked = {}
-    for k, v in cfg.items():
-        if "api_key" in k.lower() and isinstance(v, str) and len(v) > 4:
-            masked[k] = "***" + v[-4:]
-        else:
-            masked[k] = v
+    masked = _mask_sensitive_config(dict(cfg))
+    if not isinstance(masked, dict):
+        masked = {}
+
+    # 向旧配置补一个可编辑的 Embedding 区段；真正写入时仍由用户保存决定。
+    if not isinstance(masked.get("embedding"), dict):
+        from app.ai.embeddings import DEFAULT_EMBEDDING_CONFIG
+
+        masked["embedding"] = dict(DEFAULT_EMBEDDING_CONFIG, api_key="")
+
     masked["api_key_configured"] = bool(str(cfg.get("api_key") or "").strip())
     masked["api_key_preview"] = _mask_api_key(cfg.get("api_key"))
+    embedding_cfg = cfg.get("embedding") if isinstance(cfg, dict) else {}
+    if not isinstance(embedding_cfg, dict):
+        embedding_cfg = {}
+    embedding_provider = str(embedding_cfg.get("provider") or "").lower()
+    embedding_env_name = {
+        "dashscope": "DASHSCOPE_API_KEY",
+        "siliconflow": "SILICONFLOW_API_KEY",
+        "openai": "OPENAI_API_KEY",
+    }.get(embedding_provider, "")
+    embedding_env_key = os.getenv(embedding_env_name, "") if embedding_env_name else ""
+    embedding_chat_key = (
+        str(cfg.get("api_key") or "").strip()
+        if embedding_provider == str(cfg.get("provider") or "").lower()
+        else ""
+    )
+    from app.ai.embeddings import is_usable_api_key
+
+    embedding_key = next(
+        (
+            str(value).strip()
+            for value in (embedding_cfg.get("api_key"), embedding_env_key, embedding_chat_key)
+            if is_usable_api_key(value)
+        ),
+        "",
+    )
+    if isinstance(masked.get("embedding"), dict):
+        masked["embedding"]["api_key"] = _mask_api_key(embedding_key)
+    masked["embedding_api_key_configured"] = bool(
+        embedding_key
+    )
+    masked["embedding_api_key_preview"] = _mask_api_key(
+        embedding_key
+    )
     masked["protocol"] = str(cfg.get("protocol") or "chat_completions")
     masked.setdefault("allow_network_search", True)
     masked.setdefault("search_unknown_terms", True)
@@ -377,11 +472,24 @@ async def get_ai_providers():
 async def update_ai_config(data: dict):
     cfg = get_config()
 
-    # 如果 api_key 以 *** 开头，说明前端未修改，保留原值
-    for k, v in data.items():
-        if "api_key" in k.lower() and isinstance(v, str) and v.startswith("***"):
-            continue
-        cfg.ai[k] = v
+    data = {
+        key: value
+        for key, value in data.items()
+        if key
+        not in {
+            "api_key_configured",
+            "api_key_preview",
+            "embedding_api_key_configured",
+            "embedding_api_key_preview",
+            "models",
+        }
+    }
+
+    # 递归合并，支持 ai.embedding 等嵌套配置，同时保留掩码密钥。
+    existing_ai = dict(cfg.ai)
+    merged_ai = _merge_config_values(existing_ai, data)
+    cfg.ai.clear()
+    cfg.ai.update(merged_ai)
 
     if "persona_replay" in data:
         try:
@@ -395,17 +503,17 @@ async def update_ai_config(data: dict):
     config_path = _get_config_path()
     try:
         with open(config_path, "r", encoding="utf-8") as f:
-            raw = yaml.safe_load(f)
-        for k, v in data.items():
-            if "api_key" in k.lower() and isinstance(v, str) and v.startswith("***"):
-                continue
-            raw.setdefault("ai", {})[k] = v
+            raw = yaml.safe_load(f) or {}
+        raw["ai"] = _merge_config_values(raw.get("ai") or {}, data)
         with open(config_path, "w", encoding="utf-8") as f:
             yaml.safe_dump(raw, f, allow_unicode=True, default_flow_style=False)
     except Exception as e:
         raise HTTPException(500, f"AI 配置保存失败: {e}")
 
-    return {"success": True}
+    if "embedding" in data:
+        _refresh_embedding_runtime()
+
+    return {"success": True, "embedding_reload_required": "embedding" in data}
 
 
 @router.post("/config/ai/test")

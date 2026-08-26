@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -43,11 +44,29 @@ def _build_project_dir() -> str:
     """获取相对于项目根目录的持久化路径。"""
     config = get_config()
     base = getattr(config, "chroma_persist_dir", "")
-    if base:
-        return base
+    base_path = Path(base) if base else get_data_dir() / "chroma"
 
-    # 默认路径：data/chroma
-    return str(get_data_dir() / "chroma")
+    # 本地模型沿用旧路径；不同云端模型使用独立目录，避免 Chroma
+    # 把 384 维旧向量和 1024/1536 维新向量混在同一个 collection 中。
+    try:
+        from app.ai.embeddings import get_embedding_settings
+
+        embedding = get_embedding_settings()
+        provider = str(embedding.get("provider") or "local").lower()
+        model = str(embedding.get("model") or "default")
+        if provider == "local" and model == "paraphrase-multilingual-MiniLM-L12-v2":
+            return str(base_path)
+        dimension = {
+            "local": 384,
+            "siliconflow": 1024,
+            "openai": 1536,
+            "dashscope": 1024,
+        }.get(provider, "auto")
+        safe_model = re.sub(r"[^A-Za-z0-9._-]+", "_", model).strip("_") or "model"
+        return str(base_path.parent / f"{base_path.name}_{provider}_{safe_model}_{dimension}")
+    except Exception as exc:
+        logger.debug("读取 Embedding 目录配置失败，使用默认向量库: %s", exc)
+        return str(base_path)
 
 
 class VectorStoreManager:
@@ -461,3 +480,10 @@ def get_vector_store() -> VectorStoreManager:
             if _vector_store_instance is None:
                 _vector_store_instance = VectorStoreManager()
     return _vector_store_instance
+
+
+def reset_vector_store() -> None:
+    """丢弃向量库单例，使模型切换后使用新的持久化目录。"""
+    global _vector_store_instance
+    with _vs_lock:
+        _vector_store_instance = None

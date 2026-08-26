@@ -59,7 +59,7 @@ class WeixAgent:
     - RAG 检索增强 (知识库 + 长期记忆 + AI 自省)
     - 短期记忆 (MemorySaver, thread_id 隔离)
     - 长期记忆 (ChromaDB 向量存储 + SQLite 结构化)
-    - 嵌入向量 (DeepSeek/OpenAI Embedding)
+    - 可配置嵌入向量 (本地 / DashScope / SiliconFlow / OpenAI)
     - 输入/输出安全 (guard.py)
     - Checkpoint 持久化 (JSON 文件, 重启不丢失)
     """
@@ -110,8 +110,7 @@ class WeixAgent:
             from app.ai.vector_store import get_vector_store
             from app.ai.rag import RAGPipeline
 
-            provider = "local"
-            self._embedding_manager = get_embedding_manager(provider=provider)
+            self._embedding_manager = get_embedding_manager()
             self._vector_store = get_vector_store()
             self._rag = RAGPipeline(self._embedding_manager, self._vector_store)
             logger.info("RAG pipeline initialized")

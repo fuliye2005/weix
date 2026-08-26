@@ -175,6 +175,7 @@ scripts\start.bat
 - **工作流配置**：状态机定义（默认含陪玩点单流程）
 - **转发规则**：触发条件 + 目标群配置
 - **AI 配置**：Provider、API Key、模型、System Prompt
+- **Embedding 配置**：可选择本地模型，或使用 DashScope / SiliconFlow / OpenAI 的云端向量模型
 - **本人 Skill**：AI 分析你的聊天记录，自动生成你的语气人设、自我记忆、私聊/群聊 Prompt
 - **历史聊天模仿**：`replay` 模式本地匹配“上下文 → 目标人物回复”，无需 API Key；`hybrid` 模式在历史复用和 Persona 生成之间回退
 - **定时任务**：日报/周报/健康检查/数据清理管理
@@ -188,12 +189,26 @@ scripts\start.bat
 |--------|------|
 | `platform` | 运行平台 (auto / windows / macos) |
 | `ai` | LLM 配置 (provider, api_key, model 等) |
+| `ai.embedding` | 向量检索配置 (provider, api_key, base_url, model)；新配置默认使用 DashScope `text-embedding-v3` |
 | `ai.persona_replay` | 历史话术复用阈值、上下文条数、few-shot 数量和重复冷却 |
 | `auto_reply.rules` | 自动回复规则（关键词/正则/意图） |
 | `templates` | 消息模板定义 |
 | `workflows` | 工作流状态机定义 |
 | `anti_detect` | 防检测参数（发送间隔/频率/熔断） |
 | `admin` | 管理后台用户名/密码 |
+
+`ai.embedding` 示例：
+
+```yaml
+ai:
+  embedding:
+    provider: dashscope
+    model: text-embedding-v3
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: ${DASHSCOPE_API_KEY:-}
+```
+
+旧配置没有 `ai.embedding` 时仍使用已下载的本地模型。切换 Embedding 后，程序会按供应商和模型使用独立的 ChromaDB 目录；切换完成后建议重启一次后端，并重新导入或建立需要检索的知识内容。
 
 ## 目录结构
 

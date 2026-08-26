@@ -73,7 +73,7 @@ async def add_knowledge(req: KnowledgeAddRequest):
     try:
         from app.ai.embeddings import get_embedding_manager
 
-        em = get_embedding_manager(provider="local")
+        em = get_embedding_manager()
         embedding = em.embed_query(req.text)
         vs.add_knowledge(
             texts=[req.text],

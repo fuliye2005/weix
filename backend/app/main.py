@@ -225,16 +225,21 @@ def _prepare_embeddings_and_knowledge():
 
     def _load():
         try:
-            from app.ai.embeddings import get_embedding_manager, get_local_embedding_cache_status
+            from app.ai.embeddings import get_embedding_manager, get_embedding_settings, get_local_embedding_cache_status
             from app.ai.knowledge_seed import seed_knowledge_base
             from app.ai.vector_store import get_vector_store
 
-            logger.info(
-                "本地 Embedding 模型状态: %s",
-                get_local_embedding_cache_status(),
-            )
+            embedding_settings = get_embedding_settings()
+            if embedding_settings["provider"] == "local":
+                logger.info("本地 Embedding 模型状态: %s", get_local_embedding_cache_status(embedding_settings["model"]))
+            else:
+                logger.info(
+                    "云端 Embedding 配置: provider=%s model=%s",
+                    embedding_settings["provider"],
+                    embedding_settings["model"],
+                )
 
-            em = get_embedding_manager(provider="local")
+            em = get_embedding_manager()
             _ = em.embed_query("warmup")
             logger.info("Embedding 模型预加载完成")
 

@@ -13,6 +13,12 @@ ai:
   api_key: ${DEEPSEEK_API_KEY:-}
   allow_network_search: true
   base_url: https://api.deepseek.com
+  # 向量检索模型。默认新配置使用 DashScope，不占用本地显存；改为 local 可离线运行。
+  embedding:
+    api_key: ${DASHSCOPE_API_KEY:-}
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    model: text-embedding-v3
+    provider: dashscope
   max_tokens: 2000
   model: deepseek-v4-pro
   persona_message_limit: 3000

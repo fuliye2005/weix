@@ -55,7 +55,7 @@ pip install -r backend/requirements.txt --ignore-requires-python 2>&1 | tail -5
 info "后端依赖安装完成"
 
 # 预下载 AI 模型
-section "预下载 AI 模型 (~1.4GB)"
+section "预下载 AI 模型（仅本地 Embedding 模式需要）"
 if [[ -f "scripts/download_models.py" ]]; then
     info "正在下载 embedding 模型、tiktoken 编码器等..."
     info "首次下载约需 5-15 分钟（取决于网络），请耐心等待"
