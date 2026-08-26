@@ -27,6 +27,14 @@ from app.ai.prompts import (
     get_prompt_for_context,
 )
 from app.ai.tools import create_tools
+from app.ai.business_context import (
+    build_search_policy,
+    detect_business_category,
+    get_backend_business_context,
+    normalize_business_context,
+    render_business_context,
+    should_allow_web_search,
+)
 from app.utils.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
@@ -122,6 +130,14 @@ class WeixAgent:
         """
         clean_context = {k: v for k, v in context.items() if k != "is_group"}
         clean_context.setdefault("persona_replay_examples", "")
+        clean_context.setdefault("business_intent", "")
+        clean_context.setdefault("business_context", "")
+        clean_context.setdefault("search_policy", build_search_policy(""))
+        clean_context.setdefault("allow_web_search", False)
+        if isinstance(clean_context.get("business_context"), dict):
+            clean_context["business_context"] = render_business_context(
+                clean_context["business_context"]
+            )
         system_template = get_prompt_for_context(
             is_group=is_group,
             current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -151,11 +167,48 @@ class WeixAgent:
             )
         agent = create_react_agent(
             model=self.llm,
-            tools=self.tools,
+            tools=self._tools_for_context(clean_context),
             prompt=system_template,
             checkpointer=self._checkpointer,
         )
         return agent
+
+    def _tools_for_context(self, context: dict) -> list:
+        """Expose web search only for messages with an approved trigger."""
+
+        if context.get("allow_web_search", False):
+            return list(self.tools)
+        return [
+            tool
+            for tool in self.tools
+            if getattr(tool, "name", "") != "search_web"
+        ]
+
+    @staticmethod
+    def _prepare_message_context(message: str, context: dict | None = None) -> dict:
+        """Add safe, message-scoped business and search context."""
+
+        prepared = dict(context) if context else {}
+        business_category = detect_business_category(message)
+        if business_category:
+            raw_business_context = (
+                prepared["business_context"]
+                if "business_context" in prepared
+                else get_backend_business_context()
+            )
+            prepared["business_context"] = normalize_business_context(
+                raw_business_context,
+                request_category=business_category,
+            )
+            prepared["business_intent"] = business_category
+        else:
+            # Do not let a configured service profile leak into ordinary chat.
+            prepared["business_context"] = ""
+            prepared["business_intent"] = ""
+
+        prepared["allow_web_search"] = should_allow_web_search(message)
+        prepared["search_policy"] = build_search_policy(message)
+        return prepared
 
     # ------------------------------------------------------------------
     # 消息处理
@@ -237,6 +290,7 @@ class WeixAgent:
 
         context = dict(context) if context else {}
         is_group = context.pop("is_group", False)
+        context = self._prepare_message_context(safe_message, context)
         user_wxid = context.get("user_wxid", context.get("user_name", "unknown"))
         room_id = context.get("room_id", "")
 
@@ -259,7 +313,7 @@ class WeixAgent:
         simulation_mode = self._get_simulation_mode()
         replay_result: dict[str, Any] | None = None
         replay_engine = None
-        if simulation_mode in {"replay", "hybrid"}:
+        if simulation_mode in {"replay", "hybrid"} and not context.get("business_intent"):
             replay_engine = self._get_replay_engine()
             if replay_engine is not None:
                 replay_result = replay_engine.match(
