@@ -194,6 +194,7 @@ if exist "%DIST_DIR%\Weix" (
     --hidden-import=pydantic_core._pydantic_core ^
     --hidden-import=pydantic_settings ^
     --hidden-import=httpx ^
+    --hidden-import=ddgs ^
     --hidden-import=apscheduler ^
     --hidden-import=wordcloud ^
     --hidden-import=matplotlib ^
@@ -207,6 +208,7 @@ if exist "%DIST_DIR%\Weix" (
     --collect-all pydantic_core ^
     --collect-all pydantic_settings ^
     --collect-all tiktoken ^
+    --collect-all ddgs ^
     --collect-all sentence_transformers ^
     --collect-all tokenizers ^
     --collect-all transformers ^
