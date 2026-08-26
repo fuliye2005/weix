@@ -43,7 +43,7 @@ class LLMConfig:
     api_key: str = ""
     model: str = "qwen-plus"
     base_url: str = ""
-    temperature: float = 0.7
+    temperature: float = 0.4
     max_tokens: int = 2000
     top_p: float = 1.0
     frequency_penalty: float = 0.0
@@ -90,7 +90,7 @@ def create_llm(config: LLMConfig | None = None, **kwargs) -> ChatOpenAI:
             api_key=api_key,
             base_url=ai_cfg.get("base_url", ""),
             model=ai_cfg.get("model", "qwen-plus"),
-            temperature=ai_cfg.get("temperature", 0.7),
+            temperature=ai_cfg.get("temperature", 0.4),
             max_tokens=ai_cfg.get("max_tokens", 2000),
         )
 

@@ -26,7 +26,7 @@ ai:
   persona_since_days: 90
   provider: deepseek
   system_prompt: 通用能力要求：根据上下文自然进行中文微信对话；若 Persona 已加载，身份以目标人物 Persona 为准，不要自称聊天助手；先像真人聊天再回答，不要总结人物画像。
-  temperature: 0.7
+  temperature: 0.4
 
 anti_detect:
   circuit_breaker_threshold: 3
