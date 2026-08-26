@@ -162,15 +162,15 @@ class WindowsUIASender:
         self._ui_verify_timeout = float(win_cfg.get("ui_verify_timeout", 4.0))
         self._require_ui_verify = bool(win_cfg.get("require_ui_verify", True))
         try:
-            self._uia_search_retries = max(1, int(win_cfg.get("uia_search_retries", 3)))
+            self._uia_search_retries = max(1, int(win_cfg.get("uia_search_retries", 2)))
         except (TypeError, ValueError):
-            self._uia_search_retries = 3
+            self._uia_search_retries = 2
         try:
             self._uia_search_settle = max(
-                0.5, float(win_cfg.get("uia_search_settle", 2.5))
+                0.5, float(win_cfg.get("uia_search_settle", 1.0))
             )
         except (TypeError, ValueError):
-            self._uia_search_settle = 2.5
+            self._uia_search_settle = 1.0
         self._background_post_message = bool(
             win_cfg.get("background_post_message", False)
         )

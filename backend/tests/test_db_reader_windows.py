@@ -39,6 +39,23 @@ def test_windows_db_reader_find_database_files_scans_wechat_documents(tmp_path, 
     assert str(ignored) not in files
 
 
+def test_refresh_skips_unchanged_source_database(tmp_path, monkeypatch):
+    source = tmp_path / "message_0.db"
+    source.write_bytes(b"unchanged")
+
+    reader = WindowsDBReader()
+    reader._db_path = str(source)
+    reader._key = b"key"
+    reader._source_file_signature = reader._get_source_file_signature()
+    monkeypatch.setattr(
+        reader,
+        "_decrypt_to_temp",
+        lambda: pytest.fail("unchanged source should not be decrypted"),
+    )
+
+    assert reader.refresh() is True
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows 专属测试")
 def test_windows_db_reader_find_database_files_scans_xwechat_storage(tmp_path, monkeypatch):
     """Windows reader 应能发现新版 xwechat_files/db_storage 下的 DB 文件。"""

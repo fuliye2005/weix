@@ -115,6 +115,17 @@ class FakeAgent:
         return "好嘞\n\n我知道了 😄"
 
 
+def test_pipeline_reads_configured_debounce(monkeypatch):
+    monkeypatch.setattr(
+        "app.core.auto_reply_pipeline.get_config",
+        lambda: SimpleNamespace(auto_reply={"debounce_seconds": 1.5}),
+    )
+
+    pipeline = AutoReplyPipeline()
+
+    assert pipeline._debounce_seconds == 1.5
+
+
 def _group_msg(room_id="room@chatroom"):
     return WeChatMessage(
         msg_id="1",

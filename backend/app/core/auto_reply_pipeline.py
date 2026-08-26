@@ -61,7 +61,7 @@ class AutoReplyPipeline:
         self._buffer: dict[str, list] = {}
         self._buffer_timers: dict[str, asyncio.Task] = {}
         self._pending_verification_tasks: set[asyncio.Task] = set()
-        self._debounce_seconds = 20
+        self._debounce_seconds = self._load_debounce_seconds()
         self._recent_chat_context: dict[str, list[str]] = {}
         self._recent_context_limit = 12
         platform = Platform.get()
@@ -431,7 +431,7 @@ class AutoReplyPipeline:
                 logger.error(f"处理消息异常: {exc}", exc_info=True)
 
     async def _handle_message(self, msg) -> None:
-        """消息入口：白名单检查通过后进入防抖缓冲，20s 内同人消息合并处理。"""
+        """消息入口：白名单检查通过后进入防抖缓冲并合并短时间内的消息。"""
         if getattr(msg, "is_group", False):
             msg.content, msg.sender = normalize_group_message(
                 msg.content,
@@ -512,7 +512,8 @@ class AutoReplyPipeline:
             )
             return
 
-        # 防抖：取消旧定时器，入队，启动新 20s 定时器
+        # 防抖：取消旧定时器，入队，启动新的可配置定时器。
+        self._debounce_seconds = self._load_debounce_seconds()
         if buffer_key in self._buffer_timers:
             self._buffer_timers[buffer_key].cancel()
 
@@ -526,6 +527,15 @@ class AutoReplyPipeline:
         logger.debug(
             f"消息入缓冲 | key={buffer_key} | 缓冲数={len(self._buffer[buffer_key])}"
         )
+
+    @staticmethod
+    def _load_debounce_seconds() -> float:
+        """读取消息合并等待时间，避免异常配置导致过长阻塞。"""
+        try:
+            value = float(get_config().auto_reply.get("debounce_seconds", 2.0))
+        except (AttributeError, TypeError, ValueError):
+            value = 2.0
+        return max(0.0, min(60.0, value))
 
     async def _flush_buffer(self, buffer_key: str) -> None:
         """防抖到期：合并缓冲消息，执行规则匹配 + AI 回复。"""

@@ -39,6 +39,7 @@ anti_detect:
   min_send_interval: 15
 
 auto_reply:
+  debounce_seconds: 2
   enabled: true
   group_chat_mode: whitelist
   group_whitelist: []
@@ -84,8 +85,8 @@ windows_sender:
   input_verify_timeout: 3.0
   ui_verify_timeout: 4.0
   # UIA 搜索结果可能短暂为空；只重试搜索，不重复发送正文
-  uia_search_retries: 3
-  uia_search_settle: 2.5
+  uia_search_retries: 2
+  uia_search_settle: 1.0
   click_x_ratio: 0.5
   click_y_ratio: 0.88
   park_after_send: false
@@ -110,7 +111,7 @@ windows_sender:
   window_activate_delay: 0.5
 
 monitor:
-  poll_interval: 2
+  poll_interval: 1
 
 platform: auto
 

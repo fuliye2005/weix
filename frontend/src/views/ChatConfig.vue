@@ -6,6 +6,16 @@
         <el-form-item label="启用机器人">
           <el-switch v-model="form.enabled" />
         </el-form-item>
+        <el-form-item label="消息合并等待">
+          <el-input-number
+            v-model="form.debounce_seconds"
+            :min="0"
+            :max="60"
+            :step="0.5"
+            controls-position="right"
+          />
+          <span class="field-hint">秒</span>
+        </el-form-item>
         <el-form-item label="工作微信账号">
           <el-select
             v-model="selectedAccount"
@@ -241,6 +251,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Monitor, RefreshRight } from '@element-plus/icons-vue'
 
 const form = reactive<any>({
+  debounce_seconds: 2,
   enabled: true,
   group_chat_mode: 'whitelist',
   group_whitelist: [],

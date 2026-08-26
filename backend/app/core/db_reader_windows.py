@@ -71,7 +71,7 @@ class WindowsDBReader(BaseDBReader):
         r"E:\xwechat_files",
     ]
 
-    REFRESH_INTERVAL = 1.5  # 刷新间隔（秒），避免每 2s 轮询都重新解密整库
+    REFRESH_INTERVAL = 1.0  # 最短刷新检查间隔（秒）
 
     def __init__(self):
         self._key: Optional[bytes] = None
@@ -88,6 +88,7 @@ class WindowsDBReader(BaseDBReader):
         self._msg_table_cache: Optional[list[tuple[str, str]]] = None
         self._name2id_cache: Optional[dict[int, str]] = None
         self._last_refresh: float = 0
+        self._source_file_signature: tuple[int, int] | None = None
         self._current_sender_id: Optional[int] = None
 
     # --- 公共接口 ---
@@ -126,6 +127,8 @@ class WindowsDBReader(BaseDBReader):
             self._sqlite_conn.row_factory = sqlite3.Row
             self._msg_table_cache = None
             self._name2id_cache = None
+            self._last_refresh = time.monotonic()
+            self._source_file_signature = self._get_source_file_signature()
             self._current_sender_id = None
             logger.info("数据库打开成功")
             return True
@@ -146,6 +149,16 @@ class WindowsDBReader(BaseDBReader):
             return False
         try:
             with self._lock:
+                current_signature = self._get_source_file_signature()
+                if (
+                    current_signature is not None
+                    and current_signature == self._source_file_signature
+                ):
+                    # The encrypted source has not changed; keep the current
+                    # read-only snapshot instead of decrypting the whole DB.
+                    self._last_refresh = time.monotonic()
+                    return True
+
                 old_path = self._decrypted_path
                 old_conn = self._sqlite_conn
                 self._decrypted_path = self._decrypt_to_temp()
@@ -157,6 +170,9 @@ class WindowsDBReader(BaseDBReader):
                 self._sqlite_conn.row_factory = sqlite3.Row
                 self._msg_table_cache = None
                 self._name2id_cache = None
+                self._source_file_signature = (
+                    self._get_source_file_signature() or current_signature
+                )
                 self._current_sender_id = None
                 self._last_refresh = time.monotonic()
             if old_conn:
@@ -173,6 +189,14 @@ class WindowsDBReader(BaseDBReader):
         except Exception as exc:
             logger.error(f"刷新数据库副本失败: {exc}")
             return False
+
+    def _get_source_file_signature(self) -> tuple[int, int] | None:
+        """Return cheap change markers for the encrypted source database."""
+        try:
+            stat = os.stat(self._db_path)
+            return (int(stat.st_mtime_ns), int(stat.st_size))
+        except OSError:
+            return None
 
     def query_messages_since(self, timestamp: int) -> list[WeChatMessage]:
         """查询指定时间戳之后的消息。
@@ -560,6 +584,7 @@ class WindowsDBReader(BaseDBReader):
                         except Exception:
                             pass
                 self._decrypted_path = ""
+            self._source_file_signature = None
 
     def __del__(self) -> None:
         self.close()
