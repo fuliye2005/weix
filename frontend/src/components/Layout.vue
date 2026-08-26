@@ -30,6 +30,9 @@
           <el-menu-item index="/templates">消息模板</el-menu-item>
           <el-menu-item index="/workflows">工作流</el-menu-item>
           <el-menu-item index="/forward-rules">转发规则</el-menu-item>
+          <el-menu-item index="/business-config">
+            <el-icon><Briefcase /></el-icon>业务与工作时间
+          </el-menu-item>
           <el-menu-item index="/ai-config">AI 配置</el-menu-item>
           <el-menu-item index="/persona-skill">本人 Skill</el-menu-item>
           <el-menu-item index="/schedule">定时任务</el-menu-item>
