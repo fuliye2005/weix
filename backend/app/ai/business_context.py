@@ -44,7 +44,7 @@ _AVAILABILITY_RE = re.compile(
 )
 _SERVICE_CONTEXT_RE = re.compile(
     r"游戏|服务|接单|点单|订单|客服|售后|退款|交付|"
-    r"代肝|代练|代打|陪玩|陪练|上分|打手"
+    r"代肝|代练|代打|陪玩|陪练|上分|打手|工作时间|营业时间"
 )
 _GAME_TITLE_RE = re.compile(
     r"王者(?:荣耀)?|原神|崩坏(?:星穹铁道|3)?|崩铁|绝区零|鸣潮|和平精英|"
@@ -72,7 +72,8 @@ _UNKNOWN_TERM_RE = re.compile(
 )
 _UNKNOWN_TERM_QUERY_RE = re.compile(
     r"(?P<term>[A-Za-z][A-Za-z0-9_-]{1,}|[\u4e00-\u9fff]{2,12})\s*"
-    r"(?:什么意思|是什么意思|啥意思|是啥|代表什么|指什么|怎么理解)"
+    r"(?:这个)?(?:游戏|角色|英雄|活动|词|梗)?\s*"
+    r"(?:什么意思|是什么意思|是什么|啥意思|是啥|代表什么|指什么|怎么理解)"
 )
 _SEARCHABLE_ENTITY_RE = re.compile(
     r"游戏|手游|端游|网游|英雄|角色|人物|活动|联动|版本|赛季|副本|装备|技能|"
@@ -121,6 +122,16 @@ def _services(value: Any) -> list[str]:
         if len(result) >= 20:
             break
     return result
+
+
+def _is_pure_unknown_term_query(text: str) -> bool:
+    """Keep term-definition questions out of provider-specific business flow."""
+
+    match = _UNKNOWN_TERM_QUERY_RE.fullmatch(text.strip())
+    if not match:
+        return False
+    term = match.group("term").strip()
+    return not term.startswith(("你", "我", "他", "她", "这", "那", "它", "什么", "怎么"))
 
 
 def normalize_business_context(
@@ -179,6 +190,9 @@ def detect_business_category(message: str) -> str:
     if not text:
         return ""
 
+    if _is_pure_unknown_term_query(text):
+        return ""
+
     if _DIRECT_BUSINESS_RE.search(text):
         if _PRICE_RE.search(text):
             return "price"
@@ -218,6 +232,11 @@ def search_trigger_reason(message: str) -> str:
     text = _text(message, 2000)
     if _EXPLICIT_SEARCH_RE.search(text):
         return "explicit_search_request"
+    # Provider-specific status, price, and order questions must use the
+    # backend context instead of web search. An explicit search request above
+    # still wins when the user directly asks to search.
+    if detect_business_category(text):
+        return ""
     if _UNKNOWN_TERM_RE.search(text):
         return "unknown_term_or_abbreviation"
     unknown_term_match = _UNKNOWN_TERM_QUERY_RE.search(text)
@@ -225,11 +244,6 @@ def search_trigger_reason(message: str) -> str:
         term = unknown_term_match.group("term").strip()
         if not term.startswith(("你", "我", "他", "她", "这", "那", "它", "什么", "怎么")):
             return "unknown_term_or_abbreviation"
-    # Provider-specific status, price, and order questions must use the
-    # backend context instead of web search. An explicit search request above
-    # still wins when the user directly asks to search.
-    if detect_business_category(text):
-        return ""
     if (
         _FRESHNESS_RE.search(text)
         and not _CASUAL_SEARCH_BLOCK_RE.fullmatch(text)

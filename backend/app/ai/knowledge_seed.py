@@ -11,6 +11,8 @@ import time
 
 logger = logging.getLogger(__name__)
 
+SEED_VERSION = 2
+
 SEED_DOCUMENTS: list[dict] = [
     {
         "text": "业务价格、服务范围、接单状态、订单状态、预计完成时间、工作时间和退款规则不在默认知识库中固定，必须以当前后端 business_context 或人工确认结果为准。",
@@ -55,6 +57,31 @@ SEED_DOCUMENTS: list[dict] = [
 ]
 
 
+def _remove_legacy_seed_documents(collection) -> int:
+    """Remove old default business facts without touching manual documents."""
+
+    try:
+        result = collection.get(include=["metadatas"])
+        ids = result.get("ids") or []
+        metadatas = result.get("metadatas") or []
+        legacy_ids = [
+            doc_id
+            for doc_id, metadata in zip(ids, metadatas)
+            if isinstance(metadata, dict)
+            and metadata.get("source") == "seed"
+            and metadata.get("seed_version") != SEED_VERSION
+        ]
+        if not legacy_ids:
+            return 0
+
+        collection.delete(ids=legacy_ids)
+        logger.info("已移除 %d 条旧版知识库种子数据", len(legacy_ids))
+        return len(legacy_ids)
+    except Exception as exc:
+        logger.warning("清理旧版知识库种子数据失败: %s", exc)
+        return 0
+
+
 async def seed_knowledge_base(vector_store, embedding_manager) -> int:
     """将种子知识写入向量数据库。
 
@@ -67,6 +94,8 @@ async def seed_knowledge_base(vector_store, embedding_manager) -> int:
     Returns:
         写入的文档数量。
     """
+    _remove_legacy_seed_documents(vector_store.knowledge_base)
+
     try:
         existing = vector_store.knowledge_base.count()
         if existing > 0:
@@ -77,7 +106,13 @@ async def seed_knowledge_base(vector_store, embedding_manager) -> int:
 
     texts = [d["text"] for d in SEED_DOCUMENTS]
     metadatas = [
-        {"source": "seed", "topic": d["topic"], "priority": d["priority"], "added_at": time.time()}
+        {
+            "source": "seed",
+            "seed_version": SEED_VERSION,
+            "topic": d["topic"],
+            "priority": d["priority"],
+            "added_at": time.time(),
+        }
         for d in SEED_DOCUMENTS
     ]
     ids = [f"seed_{i}" for i in range(len(texts))]
