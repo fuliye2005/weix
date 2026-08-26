@@ -29,6 +29,7 @@ class Config(BaseSettings):
     macos_sender: dict[str, Any] = {}
     windows_sender: dict[str, Any] = {}
     ai: dict[str, Any] = {}
+    business: dict[str, Any] = {}
     auto_reply: dict[str, Any] = {}
     templates: list[dict[str, Any]] = []
     workflows: list[dict[str, Any]] = []

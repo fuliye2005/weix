@@ -11,29 +11,31 @@ import time
 
 logger = logging.getLogger(__name__)
 
+SEED_VERSION = 2
+
 SEED_DOCUMENTS: list[dict] = [
     {
-        "text": "陪玩价格：王者荣耀钻石以下 ¥30/h，英雄联盟钻石以上 ¥50/h，具体以陪玩师报价为准。其他游戏价格请咨询陪玩师。",
+        "text": "业务价格、服务范围、接单状态、订单状态、预计完成时间、工作时间和退款规则不在默认知识库中固定，必须以当前后端 business_context 或人工确认结果为准。",
         "topic": "价格",
         "priority": "high",
     },
     {
-        "text": "点单流程：回复「点单」或「陪玩」，按格式填写：游戏 段位 时长 预算 备注。示例：英雄联盟 钻石 2h ¥50 打野",
+        "text": "未配置的游戏服务、价格、订单流程、账号安全承诺和售后承诺不得向用户承诺；只有后端当前配置明确提供的内容才能作为回复依据。",
         "topic": "流程",
         "priority": "high",
     },
     {
-        "text": "下单后系统会自动匹配陪玩师，匹配成功后会推送陪玩师信息给你。如果长时间未匹配，可以联系群管理员。",
+        "text": "用户咨询游戏服务时，应先参考后端 business_context 的 enabled、services、status_text、is_working_now、next_available_at 和 notes 字段，不得用知识库中的历史或默认内容覆盖实时业务数据。",
         "topic": "流程",
         "priority": "medium",
     },
     {
-        "text": "陪玩师都是经过筛选和考核的，如果对陪玩师的服务不满意，可以在群内反馈或联系管理员处理。",
+        "text": "除非后端业务上下文明确配置并适用于当前问题，不得承诺服务人员筛选、服务保障、账号安全、退款或订单完成时间。",
         "topic": "服务",
         "priority": "medium",
     },
     {
-        "text": "退款政策：如果陪玩师未按时上号或因陪玩师原因无法完成订单，可申请全额退款。如果已经开始了陪玩服务，按已完成时长结算。",
+        "text": "退款和售后规则不使用默认政策推断；无法从当前后端业务数据确认时，应直接说明需要人工确认。",
         "topic": "售后",
         "priority": "high",
     },
@@ -43,16 +45,41 @@ SEED_DOCUMENTS: list[dict] = [
         "priority": "high",
     },
     {
-        "text": "工作时间：陪玩服务一般是每天 10:00-24:00，深夜时段可能陪玩师较少。建议提前预约。",
+        "text": "工作时间和当前接单状态不能根据本地时间推算；仅使用后端提供的 is_working_now、status_text 和 next_available_at。",
         "topic": "服务",
         "priority": "low",
     },
     {
-        "text": "支持的游戏：王者荣耀、英雄联盟、原神、和平精英、永劫无间、CS2、Valorant 等主流游戏。如有其他游戏需求可咨询管理员。",
+        "text": "支持的游戏和服务列表不采用默认清单；只有 business_context.services 中明确列出的项目才视为已配置。",
         "topic": "服务",
         "priority": "medium",
     },
 ]
+
+
+def _remove_legacy_seed_documents(collection) -> int:
+    """Remove old default business facts without touching manual documents."""
+
+    try:
+        result = collection.get(include=["metadatas"])
+        ids = result.get("ids") or []
+        metadatas = result.get("metadatas") or []
+        legacy_ids = [
+            doc_id
+            for doc_id, metadata in zip(ids, metadatas)
+            if isinstance(metadata, dict)
+            and metadata.get("source") == "seed"
+            and metadata.get("seed_version") != SEED_VERSION
+        ]
+        if not legacy_ids:
+            return 0
+
+        collection.delete(ids=legacy_ids)
+        logger.info("已移除 %d 条旧版知识库种子数据", len(legacy_ids))
+        return len(legacy_ids)
+    except Exception as exc:
+        logger.warning("清理旧版知识库种子数据失败: %s", exc)
+        return 0
 
 
 async def seed_knowledge_base(vector_store, embedding_manager) -> int:
@@ -67,6 +94,8 @@ async def seed_knowledge_base(vector_store, embedding_manager) -> int:
     Returns:
         写入的文档数量。
     """
+    _remove_legacy_seed_documents(vector_store.knowledge_base)
+
     try:
         existing = vector_store.knowledge_base.count()
         if existing > 0:
@@ -77,7 +106,13 @@ async def seed_knowledge_base(vector_store, embedding_manager) -> int:
 
     texts = [d["text"] for d in SEED_DOCUMENTS]
     metadatas = [
-        {"source": "seed", "topic": d["topic"], "priority": d["priority"], "added_at": time.time()}
+        {
+            "source": "seed",
+            "seed_version": SEED_VERSION,
+            "topic": d["topic"],
+            "priority": d["priority"],
+            "added_at": time.time(),
+        }
         for d in SEED_DOCUMENTS
     ]
     ids = [f"seed_{i}" for i in range(len(texts))]

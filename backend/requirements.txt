@@ -44,6 +44,7 @@ passlib[bcrypt]>=1.7.0
 # Utils
 pyyaml>=6.0.0
 python-dotenv>=1.0.1
+tzdata>=2024.1; sys_platform == "win32"
 pydantic>=2.10.0
 pydantic-settings>=2.7.0
 httpx>=0.28.0
