@@ -678,6 +678,39 @@ def test_auto_does_not_fallback_after_background_input_state_changed(monkeypatch
     assert calls == [True]
 
 
+def test_background_state_change_after_send_action_waits_for_database_verify(monkeypatch):
+    sender = WindowsUIASender()
+    attempted = SendResult.for_message("你好", "wxid_target", "background_uia")
+    attempted.action_performed = True
+
+    monkeypatch.setattr(
+        sender,
+        "_foreground_input_state",
+        lambda: {
+            "foreground_hwnd": 2,
+            "focus_hwnd": 3,
+            "cursor_x": 4,
+            "cursor_y": 5,
+        },
+    )
+
+    unchanged = sender._verify_background_state(
+        attempted,
+        {
+            "foreground_hwnd": 1,
+            "focus_hwnd": 1,
+            "cursor_x": 4,
+            "cursor_y": 5,
+        },
+        "after_invoke",
+    )
+
+    assert unchanged is False
+    assert attempted.status == "pending_verify"
+    assert attempted.stage == "db_verify"
+    assert attempted.error_code == "db_verification_deferred"
+
+
 def test_background_retries_then_switches_to_foreground(monkeypatch):
     sender = WindowsUIASender()
     sender._send_mode = "auto"

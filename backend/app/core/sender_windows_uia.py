@@ -1441,6 +1441,27 @@ class WindowsUIASender:
         }
         if unchanged:
             return True
+
+        # The send button can legitimately move focus/activation after it has
+        # accepted the draft. The action is now ambiguous, so verify the
+        # target database instead of retrying or reporting an immediate loss.
+        if result.action_performed and phase in {"after_invoke", "after_post_message"}:
+            result.pending(
+                "db_verify",
+                error_code="db_verification_deferred",
+                error_message="后台 UIA 已执行发送动作，前台状态发生变化，等待数据库确认",
+                db_verified=False,
+                ui_verified=result.ui_verified,
+                background_phase=phase,
+                background_before=before,
+                background_after=after,
+            )
+            logger.info(
+                "后台 UIA 发送动作后前台状态变化，转入数据库验证 | phase=%s",
+                phase,
+            )
+            return False
+
         result.fail(
             "invoke" if phase == "after_invoke" else "window",
             "background_input_state_changed",
