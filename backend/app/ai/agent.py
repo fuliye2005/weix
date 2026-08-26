@@ -31,6 +31,7 @@ from app.ai.business_context import (
     build_search_policy,
     detect_business_category,
     get_backend_business_context,
+    get_search_settings,
     normalize_business_context,
     render_business_context,
     should_allow_web_search,
@@ -206,8 +207,23 @@ class WeixAgent:
             prepared["business_context"] = ""
             prepared["business_intent"] = ""
 
-        prepared["allow_web_search"] = should_allow_web_search(message)
-        prepared["search_policy"] = build_search_policy(message)
+        try:
+            from app.config import get_config
+
+            ai_config = getattr(get_config(), "ai", {})
+        except Exception:
+            ai_config = {}
+        allow_network_search, search_unknown_terms = get_search_settings(ai_config)
+        prepared["allow_web_search"] = should_allow_web_search(
+            message,
+            allow_network_search=allow_network_search,
+            search_unknown_terms=search_unknown_terms,
+        )
+        prepared["search_policy"] = build_search_policy(
+            message,
+            allow_network_search=allow_network_search,
+            search_unknown_terms=search_unknown_terms,
+        )
         return prepared
 
     # ------------------------------------------------------------------

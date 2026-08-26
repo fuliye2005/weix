@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 BUSINESS_CONTEXT_KEYS = (
@@ -32,6 +34,30 @@ DEFAULT_BUSINESS_CONTEXT: dict[str, Any] = {
     "next_available_at": "未配置",
     "notes": "未配置具体服务、价格、订单状态、完成时间或账号安全承诺。",
 }
+
+DAY_KEYS = (
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+)
+
+DEFAULT_BUSINESS_CONFIG: dict[str, Any] = {
+    "enabled": False,
+    "category": "general_service",
+    "display_name": "",
+    "timezone": "Asia/Shanghai",
+    "services": [],
+    "weekly_hours": {day: [] for day in DAY_KEYS},
+    "exceptions": [],
+    "notes": "",
+    "off_hours_policy": "relevant_only",
+}
+
+_TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 
 _DIRECT_BUSINESS_RE = re.compile(
@@ -124,6 +150,183 @@ def _services(value: Any) -> list[str]:
     return result
 
 
+def _normalize_intervals(value: Any) -> list[dict[str, str]]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        source: Sequence[Any] = value
+    elif isinstance(value, Mapping) and isinstance(value.get("intervals"), Sequence):
+        source = value["intervals"]
+    else:
+        source = []
+
+    result: list[dict[str, str]] = []
+    for item in source:
+        if not isinstance(item, Mapping):
+            continue
+        start = _text(item.get("start", item.get("open")), 5)
+        end = _text(item.get("end", item.get("close")), 5)
+        if _TIME_RE.fullmatch(start) and _TIME_RE.fullmatch(end):
+            result.append({"start": start, "end": end})
+    return result[:24]
+
+
+def normalize_business_config(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Normalize the editable business-hours configuration from the UI."""
+
+    source = value if isinstance(value, Mapping) else {}
+    weekly_source = source.get("weekly_hours")
+    weekly_source = weekly_source if isinstance(weekly_source, Mapping) else {}
+    weekly_hours: dict[str, list[dict[str, str]]] = {}
+    for day in DAY_KEYS:
+        aliases = (day, day[:3])
+        raw = next((weekly_source.get(alias) for alias in aliases if alias in weekly_source), [])
+        weekly_hours[day] = _normalize_intervals(raw)
+
+    exceptions: list[dict[str, Any]] = []
+    raw_exceptions = source.get("exceptions")
+    if isinstance(raw_exceptions, Sequence) and not isinstance(raw_exceptions, (str, bytes, bytearray)):
+        for item in raw_exceptions:
+            if not isinstance(item, Mapping):
+                continue
+            exception_date = _text(item.get("date"), 10)
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", exception_date):
+                continue
+            raw_type = _text(item.get("type", item.get("status")), 20).lower()
+            exception_type = (
+                "open"
+                if raw_type in {"open", "temporary_open", "business"}
+                else "special"
+                if raw_type in {"special", "special_hours"}
+                else "closed"
+            )
+            exceptions.append(
+                {
+                    "date": exception_date,
+                    "type": exception_type,
+                    "intervals": []
+                    if exception_type == "closed"
+                    else _normalize_intervals(item.get("intervals", item.get("hours"))),
+                    "note": _text(item.get("note", item.get("notes")), 160),
+                }
+            )
+
+    policy = _text(source.get("off_hours_policy"), 30).lower()
+    if policy not in {"relevant_only", "all"}:
+        policy = "relevant_only"
+
+    return {
+        "enabled": _bool(source.get("enabled"), False),
+        "category": _text(source.get("category"), 80)
+        or DEFAULT_BUSINESS_CONFIG["category"],
+        "display_name": _text(source.get("display_name"), 80),
+        "timezone": _text(source.get("timezone"), 80)
+        or DEFAULT_BUSINESS_CONFIG["timezone"],
+        "services": _services(source.get("services")),
+        "weekly_hours": weekly_hours,
+        "exceptions": exceptions[:366],
+        "notes": _text(source.get("notes"), 1000),
+        "off_hours_policy": policy,
+    }
+
+
+def _business_zone(name: str):
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        return timezone.utc
+
+
+def _schedule_intervals(config: Mapping[str, Any], current_date: date) -> list[dict[str, str]]:
+    date_text = current_date.isoformat()
+    for exception in config.get("exceptions", []):
+        if exception.get("date") != date_text:
+            continue
+        return [] if exception.get("type") == "closed" else list(exception.get("intervals", []))
+
+    day = DAY_KEYS[current_date.weekday()]
+    return list(config.get("weekly_hours", {}).get(day, []))
+
+
+def _periods_for_date(
+    config: Mapping[str, Any], current_date: date, zone
+) -> list[tuple[datetime, datetime]]:
+    periods: list[tuple[datetime, datetime]] = []
+    for interval in _schedule_intervals(config, current_date):
+        try:
+            start = datetime.combine(
+                current_date, time.fromisoformat(interval["start"]), tzinfo=zone
+            )
+            end = datetime.combine(
+                current_date, time.fromisoformat(interval["end"]), tzinfo=zone
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end <= start:
+            end += timedelta(days=1)
+        periods.append((start, end))
+    return periods
+
+
+def _format_available_at(value: datetime, timezone_name: str) -> str:
+    return f"{value:%Y-%m-%d %H:%M} ({timezone_name})"
+
+
+def build_business_context(
+    value: Mapping[str, Any] | None, *, now: datetime | None = None
+) -> dict[str, Any]:
+    """Derive the message-scoped context from the configured weekly schedule."""
+
+    config = normalize_business_config(value)
+    base = {
+        "enabled": config["enabled"],
+        "category": config["category"],
+        "services": config["services"],
+        "is_working_now": False,
+        "status_text": "",
+        "next_available_at": "未配置",
+        "notes": config["notes"],
+    }
+
+    if not config["enabled"]:
+        base["status_text"] = "业务配置未启用，暂不确认当前接单状态。"
+        return normalize_business_context(base)
+
+    zone = _business_zone(config["timezone"])
+    current = now or datetime.now(zone)
+    local_now = current.replace(tzinfo=zone) if current.tzinfo is None else current.astimezone(zone)
+    current_period: tuple[datetime, datetime] | None = None
+    next_start: datetime | None = None
+    has_schedule = False
+
+    for offset in range(-1, 8):
+        schedule_date = local_now.date() + timedelta(days=offset)
+        for start, end in _periods_for_date(config, schedule_date, zone):
+            has_schedule = True
+            if start <= local_now < end:
+                current_period = (start, end)
+            elif start > local_now and (next_start is None or start < next_start):
+                next_start = start
+
+    if current_period:
+        base["is_working_now"] = True
+        base["status_text"] = "当前处于工作时间，可咨询已配置服务。"
+        base["next_available_at"] = _format_available_at(
+            current_period[1], config["timezone"]
+        )
+    elif not has_schedule:
+        base["status_text"] = "尚未配置工作时间，无法确认当前接单状态。"
+    else:
+        base["status_text"] = "当前不在工作时间，暂未进入工作时段。"
+        if next_start:
+            base["next_available_at"] = _format_available_at(
+                next_start, config["timezone"]
+            )
+
+    if config["display_name"]:
+        prefix = f"{config['display_name']}："
+        base["status_text"] = prefix + base["status_text"]
+    return normalize_business_context(base)
+
+
 def _is_pure_unknown_term_query(text: str) -> bool:
     """Keep term-definition questions out of provider-specific business flow."""
 
@@ -166,16 +369,17 @@ def normalize_business_context(
 
 
 def get_backend_business_context() -> dict[str, Any]:
-    """Load the backend-provided context from ``ai.business_context``.
-
-    A missing or malformed configuration is equivalent to a disabled service.
-    This function never calculates working hours.
-    """
+    """Load and derive the current context from the shared business config."""
 
     try:
         from app.config import get_config
 
         config = get_config()
+        business_config = getattr(config, "business", {})
+        if isinstance(business_config, Mapping) and business_config:
+            return build_business_context(business_config)
+
+        # Keep compatibility with the short-lived ai.business_context format.
         ai_config = getattr(config, "ai", {})
         raw = ai_config.get("business_context") if isinstance(ai_config, Mapping) else None
         return normalize_business_context(raw)
@@ -226,8 +430,26 @@ def is_business_query(message: str) -> bool:
     return bool(detect_business_category(message))
 
 
-def search_trigger_reason(message: str) -> str:
+def get_search_settings(ai_config: Mapping[str, Any] | None = None) -> tuple[bool, bool]:
+    """Return global search and unknown-term switches with compatible defaults."""
+
+    source = ai_config if isinstance(ai_config, Mapping) else {}
+    return (
+        _bool(source.get("allow_network_search"), True),
+        _bool(source.get("search_unknown_terms"), True),
+    )
+
+
+def search_trigger_reason(
+    message: str,
+    *,
+    allow_network_search: bool = True,
+    search_unknown_terms: bool = True,
+) -> str:
     """Return why the existing web-search tool may be exposed for a message."""
+
+    if not allow_network_search:
+        return ""
 
     text = _text(message, 2000)
     if _EXPLICIT_SEARCH_RE.search(text):
@@ -237,10 +459,10 @@ def search_trigger_reason(message: str) -> str:
     # still wins when the user directly asks to search.
     if detect_business_category(text):
         return ""
-    if _UNKNOWN_TERM_RE.search(text):
+    if search_unknown_terms and _UNKNOWN_TERM_RE.search(text):
         return "unknown_term_or_abbreviation"
     unknown_term_match = _UNKNOWN_TERM_QUERY_RE.search(text)
-    if unknown_term_match and not _CASUAL_SEARCH_BLOCK_RE.fullmatch(text):
+    if search_unknown_terms and unknown_term_match and not _CASUAL_SEARCH_BLOCK_RE.fullmatch(text):
         term = unknown_term_match.group("term").strip()
         if not term.startswith(("你", "我", "他", "她", "这", "那", "它", "什么", "怎么")):
             return "unknown_term_or_abbreviation"
@@ -253,12 +475,32 @@ def search_trigger_reason(message: str) -> str:
     return ""
 
 
-def should_allow_web_search(message: str) -> bool:
-    return bool(search_trigger_reason(message))
+def should_allow_web_search(
+    message: str,
+    *,
+    allow_network_search: bool = True,
+    search_unknown_terms: bool = True,
+) -> bool:
+    return bool(
+        search_trigger_reason(
+            message,
+            allow_network_search=allow_network_search,
+            search_unknown_terms=search_unknown_terms,
+        )
+    )
 
 
-def build_search_policy(message: str) -> str:
-    reason = search_trigger_reason(message)
+def build_search_policy(
+    message: str,
+    *,
+    allow_network_search: bool = True,
+    search_unknown_terms: bool = True,
+) -> str:
+    reason = search_trigger_reason(
+        message,
+        allow_network_search=allow_network_search,
+        search_unknown_terms=search_unknown_terms,
+    )
     if reason:
         return (
             "允许按需调用现有 search_web 工具，触发原因："

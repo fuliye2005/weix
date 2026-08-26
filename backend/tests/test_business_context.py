@@ -1,11 +1,16 @@
+import asyncio
 import os
 import sys
+from datetime import datetime, timezone
 from types import SimpleNamespace
+
+import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.ai.agent import WeixAgent
 from app.ai.business_context import (
+    build_business_context,
     build_search_policy,
     detect_business_category,
     get_backend_business_context,
@@ -13,6 +18,7 @@ from app.ai.business_context import (
     normalize_business_context,
     render_business_context,
     search_trigger_reason,
+    should_allow_web_search,
 )
 from app.ai.prompts import get_prompt_for_context
 
@@ -109,6 +115,80 @@ def test_search_tool_is_gated_by_message_policy():
 
     assert WeixAgent._tools_for_context(agent, {"allow_web_search": False}) == [weather]
     assert WeixAgent._tools_for_context(agent, {"allow_web_search": True}) == [weather, search]
+
+
+def test_business_hours_context_uses_weekly_schedule_and_timezone():
+    config = {
+        "enabled": True,
+        "category": "game_service",
+        "timezone": "UTC",
+        "services": ["王者荣耀代练"],
+        "weekly_hours": {
+            "wednesday": [{"start": "09:00", "end": "18:00"}],
+            "thursday": [{"start": "10:00", "end": "16:00"}],
+        },
+    }
+
+    working = build_business_context(
+        config,
+        now=datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc),
+    )
+    resting = build_business_context(
+        config,
+        now=datetime(2026, 8, 26, 23, 30, tzinfo=timezone.utc),
+    )
+
+    assert working["is_working_now"] is True
+    assert working["next_available_at"] == "2026-08-26 18:00 (UTC)"
+    assert resting["is_working_now"] is False
+    assert resting["next_available_at"] == "2026-08-27 10:00 (UTC)"
+
+
+def test_search_settings_can_disable_network_and_unknown_term_search():
+    assert should_allow_web_search(
+        "王者荣耀新赛季什么时候开始",
+        allow_network_search=False,
+    ) is False
+    assert search_trigger_reason(
+        "这个词是什么意思",
+        search_unknown_terms=False,
+    ) == ""
+    assert search_trigger_reason(
+        "帮我搜索一下王者荣耀新赛季",
+        allow_network_search=True,
+        search_unknown_terms=False,
+    ) == "explicit_search_request"
+
+
+def test_business_config_api_persists_the_shared_section(tmp_path, monkeypatch):
+    from app.api import config as config_api
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("ai: {}\n", encoding="utf-8")
+    runtime = SimpleNamespace(business={})
+    monkeypatch.setattr(config_api, "get_config", lambda: runtime)
+    monkeypatch.setattr(config_api, "_get_config_path", lambda: str(config_path))
+
+    result = asyncio.run(
+        config_api.update_business_config(
+            {
+                "enabled": True,
+                "display_name": "夜间代肝",
+                "timezone": "UTC",
+                "weekly_hours": {
+                    "wednesday": [{"start": "10:00", "end": "18:00"}],
+                },
+                "services": ["原神代肝"],
+            }
+        )
+    )
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    assert result["enabled"] is True
+    assert runtime.business["display_name"] == "夜间代肝"
+    assert saved["business"]["weekly_hours"]["wednesday"] == [
+        {"start": "10:00", "end": "18:00"}
+    ]
 
 
 def test_prompts_include_business_precedence_and_search_safety_rules():

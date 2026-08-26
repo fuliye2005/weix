@@ -318,6 +318,37 @@ async def update_chat_config(data: dict):
     return {"success": True, "windows_sender": _get_uia_policy()}
 
 
+# --- Business and working-hours config ---
+@router.get("/config/business")
+async def get_business_config():
+    from app.ai.business_context import normalize_business_config
+
+    return normalize_business_config(getattr(get_config(), "business", {}))
+
+
+@router.put("/config/business")
+async def update_business_config(data: dict):
+    from app.ai.business_context import normalize_business_config
+
+    normalized = normalize_business_config(data or {})
+    cfg = get_config()
+    cfg.business = normalized
+
+    config_path = _get_config_path()
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        if not isinstance(raw, dict):
+            raise ValueError("配置文件顶层必须是对象")
+        raw["business"] = normalized
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(raw, f, allow_unicode=True, default_flow_style=False)
+    except Exception as e:
+        raise HTTPException(500, f"业务配置保存失败: {e}")
+
+    return normalized
+
+
 # --- AI Config ---
 @router.get("/config/ai")
 async def get_ai_config():
@@ -331,6 +362,8 @@ async def get_ai_config():
     masked["api_key_configured"] = bool(str(cfg.get("api_key") or "").strip())
     masked["api_key_preview"] = _mask_api_key(cfg.get("api_key"))
     masked["protocol"] = str(cfg.get("protocol") or "chat_completions")
+    masked.setdefault("allow_network_search", True)
+    masked.setdefault("search_unknown_terms", True)
     return masked
 
 
