@@ -20,6 +20,7 @@ const routes = [
       { path: 'templates', name: 'Templates', component: () => import('../views/Templates.vue') },
       { path: 'workflows', name: 'Workflows', component: () => import('../views/Workflows.vue') },
       { path: 'forward-rules', name: 'ForwardRules', component: () => import('../views/ForwardRules.vue') },
+      { path: 'business-config', name: 'BusinessConfig', component: () => import('../views/BusinessConfig.vue') },
       { path: 'ai-config', name: 'AIConfig', component: () => import('../views/AIConfig.vue') },
       { path: 'persona-skill', name: 'PersonaSkill', component: () => import('../views/PersonaSkill.vue') },
       { path: 'schedule', name: 'ScheduleConfig', component: () => import('../views/ScheduleConfig.vue') },
