@@ -218,7 +218,7 @@ const form = reactive<AnyRecord>({
   api_key: '',
   base_url: '',
   model: '',
-  temperature: 0.7,
+  temperature: 0.4,
   max_tokens: 2000,
   persona_mode: 'persona',
   persona_since_days: 90,
@@ -226,8 +226,8 @@ const form = reactive<AnyRecord>({
   persona_import_max_mb: 256,
   profile_name: '',
   system_prompt: '',
-  allow_network_search: false,
-  search_unknown_terms: false,
+  allow_network_search: true,
+  search_unknown_terms: true,
 })
 
 const jsonValid = computed(() => {
