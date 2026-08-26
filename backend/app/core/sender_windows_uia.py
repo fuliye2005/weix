@@ -1443,7 +1443,7 @@ class WindowsUIASender:
             return True
 
         # The send button can legitimately move focus/activation after it has
-        # accepted the draft.  The action is now ambiguous, so verify the
+        # accepted the draft. The action is now ambiguous, so verify the
         # target database instead of retrying or reporting an immediate loss.
         if result.action_performed and phase in {"after_invoke", "after_post_message"}:
             result.pending(
